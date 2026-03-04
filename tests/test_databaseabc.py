@@ -433,6 +433,31 @@ class TestDatabaseRecordProtocolMixin:
         seq.database._data.setdefault(ns, {})[DATABASE_METADATA_KEY] = b"meta"
         assert seq.database.get_key_range(ns) == (None, None)
 
+    def test_db_save_records_handles_dirty_set_mutation_during_serialize(self):
+        class MutatingOnSerializeSequence(SampleSequence):
+            def __init__(self):
+                super().__init__()
+                self._extra_dirty_timestamp: Optional[DatabaseTimestamp] = None
+
+            def _db_serialize_record(self, record: SampleRecord) -> bytes:
+                if self._extra_dirty_timestamp is not None:
+                    self._db_dirty_timestamps.add(self._extra_dirty_timestamp)
+                return super()._db_serialize_record(record)
+
+        seq = MutatingOnSerializeSequence()
+        base = to_datetime()
+        first = SampleRecord(date_time=base, value=1.0)
+        second = SampleRecord(date_time=base.add(hours=1), value=2.0)
+
+        seq.db_insert_record(first)
+        seq.db_insert_record(second, mark_dirty=False)
+        seq._extra_dirty_timestamp = DatabaseTimestamp.from_datetime(second.date_time)
+
+        saved = seq.db_save_records()
+
+        assert saved == 1
+        assert seq._extra_dirty_timestamp in seq._db_dirty_timestamps
+
 
 # ---------------------------------------------------------------------------
 # Compaction tests

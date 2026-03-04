@@ -1662,7 +1662,8 @@ class DatabaseRecordProtocolMixin(
 
         # --- handle inserts/updates ---
         save_items = []
-        for dt in self._db_dirty_timestamps:
+        dirty_snapshot = list(self._db_dirty_timestamps)
+        for dt in dirty_snapshot:
             record = self._db_record_index.get(dt)
             if record:
                 key = self._db_key_from_timestamp(dt)
@@ -1671,8 +1672,8 @@ class DatabaseRecordProtocolMixin(
         saved_count = len(save_items)
         if saved_count:
             self.database.save_records(save_items, namespace=namespace)
-        self._db_dirty_timestamps.clear()
-        self._db_new_timestamps.clear()
+        self._db_dirty_timestamps.difference_update(dirty_snapshot)
+        self._db_new_timestamps.difference_update(dirty_snapshot)
 
         # --- handle deletions ---
         if self._db_deleted_timestamps:
