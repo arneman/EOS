@@ -6,9 +6,9 @@ MQTT to EOS Bridge
 Connects to MQTT broker and forwards device measurements to EOS REST API.
 
 MQTT Topics:
-- devices/bmw_i5/cardata/battery_soc → BMW_i5-soc-factor
+- devices/bmw_i5/cardata/drivetrain/batteryManagement/header → BMW_i5-soc-factor
 - devices/victron_battery/battery_soc → LiFePO4_Cluster-soc-factor
-- devices/victron_battery/ac_power_w + devices/victron_battery2/ac_power_w → LiFePO4_Cluster-power-3-phase-sym-w
+- devices/victron_battery/ac_power_w + devices/victron_battery_2/ac_power_w → LiFePO4_Cluster-power-3-phase-sym-w
 
 Configuration via environment variables:
 - MQTT_BROKER (default: mqtt.fritz.box)
@@ -40,12 +40,45 @@ import requests
 from loguru import logger
 
 # =============================================================================
+# Defaults (changeable values)
+# =============================================================================
+
+DEFAULT_MQTT_BROKER = "mqtt.fritz.box"
+DEFAULT_MQTT_PORT = 1883
+DEFAULT_MQTT_USER = "mqtt_user"
+DEFAULT_EOS_URL = "http://localhost:8503"
+DEFAULT_LOG_LEVEL = "INFO"
+
+EOS_MEASUREMENT_PATH = "/v1/measurement/value"
+EOS_HEALTH_PATH = "/docs"
+
+EOS_PUT_TIMEOUT_S = 5
+EOS_HEALTH_TIMEOUT_S = 5
+EOS_SEND_INTERVAL_S = 60
+BATTERY_POWER_DEBOUNCE_S = 5
+MQTT_KEEPALIVE_S = 60
+
+TOPIC_BMW_SOC = "devices/bmw_i5/cardata/drivetrain/batteryManagement/header"
+TOPIC_BATTERY_SOC = "devices/victron_battery/battery_soc"
+TOPIC_BATTERY_POWER_1 = "devices/victron_battery/ac_power_w"
+TOPIC_BATTERY_POWER_2 = "devices/victron_battery_2/ac_power_w"
+
+BMW_SOC_EOS_KEY = "BMW_i5-soc-factor"
+BATTERY_SOC_EOS_KEY = "LiFePO4_Cluster-soc-factor"
+BATTERY_POWER_EOS_KEY = "LiFePO4_Cluster-power-3-phase-sym-w"
+
+BMW_SOC_DESCRIPTION = "BMW i5 State of Charge"
+BATTERY_SOC_DESCRIPTION = "Battery State of Charge"
+
+SOC_SCALE_FACTOR = 100.0
+
+# =============================================================================
 # Configuration
 # =============================================================================
 
-MQTT_BROKER = os.getenv("MQTT_BROKER", "mqtt.fritz.box")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USER = os.getenv("MQTT_USER", "mqtt_user")
+MQTT_BROKER = os.getenv("MQTT_BROKER", DEFAULT_MQTT_BROKER)
+MQTT_PORT = int(os.getenv("MQTT_PORT", str(DEFAULT_MQTT_PORT)))
+MQTT_USER = os.getenv("MQTT_USER", DEFAULT_MQTT_USER)
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
 
 if not MQTT_PASSWORD:
@@ -53,48 +86,43 @@ if not MQTT_PASSWORD:
     print("Usage: export MQTT_PASSWORD='your-password'")
     sys.exit(1)
 
-MQTT_TOPICS = [
-    "devices/bmw_i5/cardata/battery_soc",
-    "devices/victron_battery/battery_soc",
-    "devices/victron_battery/ac_power_w",
-    "devices/victron_battery2/ac_power_w",
-]
+EOS_URL = os.getenv("EOS_URL", DEFAULT_EOS_URL)
+EOS_MEASUREMENT_ENDPOINT = f"{EOS_URL}{EOS_MEASUREMENT_PATH}"
 
-EOS_URL = os.getenv("EOS_URL", "http://localhost:8503")
-EOS_MEASUREMENT_ENDPOINT = f"{EOS_URL}/v1/measurement/value"
-
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_LEVEL = os.getenv("LOG_LEVEL", DEFAULT_LOG_LEVEL)
 
 # =============================================================================
 # MQTT Topic to EOS Measurement Key Mapping
 # =============================================================================
 
 TOPIC_MAPPING = {
-    "devices/bmw_i5/cardata/battery_soc": {
-        "eos_key": "BMW_i5-soc-factor",
-        "converter": lambda x: float(x) / 100.0,  # Assuming MQTT sends 0-100%
-        "description": "BMW i5 State of Charge",
+    TOPIC_BMW_SOC: {
+        "eos_key": BMW_SOC_EOS_KEY,
+        "converter": lambda x: float(x) / SOC_SCALE_FACTOR,  # MQTT sends 0-100%
+        "description": BMW_SOC_DESCRIPTION,
     },
-    "devices/victron_battery/battery_soc": {
-        "eos_key": "LiFePO4_Cluster-soc-factor",
-        "converter": lambda x: float(x) / 100.0,  # Assuming MQTT sends 0-100%
-        "description": "Battery State of Charge",
+    TOPIC_BATTERY_SOC: {
+        "eos_key": BATTERY_SOC_EOS_KEY,
+        "converter": lambda x: float(x) / SOC_SCALE_FACTOR,  # MQTT sends 0-100%
+        "description": BATTERY_SOC_DESCRIPTION,
     },
 }
 
 # Battery power requires summing two topics
-BATTERY_POWER_TOPICS = {
-    "devices/victron_battery/ac_power_w": None,
-    "devices/victron_battery2/ac_power_w": None,
-}
+BATTERY_POWER_TOPICS = [
+    TOPIC_BATTERY_POWER_1,
+    TOPIC_BATTERY_POWER_2,
+]
+
+MQTT_TOPICS = sorted(set(TOPIC_MAPPING.keys()) | set(BATTERY_POWER_TOPICS))
 
 # =============================================================================
 # Global State
 # =============================================================================
 
 battery_power_cache: Dict[str, Optional[float]] = {
-    "devices/victron_battery/ac_power_w": None,
-    "devices/victron_battery2/ac_power_w": None,
+    TOPIC_BATTERY_POWER_1: None,
+    TOPIC_BATTERY_POWER_2: None,
 }
 battery_power_last_update = 0.0
 
@@ -134,7 +162,7 @@ def send_to_eos(key: str, value: float, description: str = "") -> bool:
     # Send if: value changed OR 60+ seconds passed
     if last_value != value and last_value is not None:
         logger.debug(f"Value changed: {key}: {last_value} → {value}")
-    elif time_since_last_send < 60:
+    elif time_since_last_send < EOS_SEND_INTERVAL_S:
         # Same value and less than 60 seconds - skip
         logger.trace(f"Skipping {key}={value} (unchanged, {time_since_last_send:.0f}s since last send)")
         return True  # Not an error, just skipped
@@ -143,7 +171,7 @@ def send_to_eos(key: str, value: float, description: str = "") -> bool:
         response = requests.put(
             EOS_MEASUREMENT_ENDPOINT,
             params={"datetime": now, "key": key, "value": value},
-            timeout=5,
+            timeout=EOS_PUT_TIMEOUT_S,
         )
         response.raise_for_status()
         
@@ -165,8 +193,8 @@ def process_battery_power():
     # Check if we have both values
     if None in battery_power_cache.values():
         logger.debug(
-            f"Battery power: waiting for both values (victron: {battery_power_cache['devices/victron_battery/ac_power_w']}, "
-            f"victron2: {battery_power_cache['devices/victron_battery2/ac_power_w']})"
+            f"Battery power: waiting for both values (victron: {battery_power_cache[TOPIC_BATTERY_POWER_1]}, "
+            f"victron2: {battery_power_cache[TOPIC_BATTERY_POWER_2]})"
         )
         return
 
@@ -175,17 +203,17 @@ def process_battery_power():
 
     # Avoid sending duplicate values too frequently (debouncing)
     now = time.time()
-    if now - battery_power_last_update < 5:  # Min 5 seconds between updates
+    if now - battery_power_last_update < BATTERY_POWER_DEBOUNCE_S:  # Min seconds between updates
         return
 
     battery_power_last_update = now
 
     # Send to EOS
     success = send_to_eos(
-        "LiFePO4_Cluster-power-3-phase-sym-w",
+        BATTERY_POWER_EOS_KEY,
         total_power,
-        f"Battery Power (victron:{battery_power_cache['devices/victron_battery/ac_power_w']:.1f}W + "
-        f"victron2:{battery_power_cache['devices/victron_battery2/ac_power_w']:.1f}W)",
+        f"Battery Power (victron:{battery_power_cache[TOPIC_BATTERY_POWER_1]:.1f}W + "
+        f"victron2:{battery_power_cache[TOPIC_BATTERY_POWER_2]:.1f}W)",
     )
 
     if success:
@@ -276,7 +304,7 @@ def main():
 
     # Check EOS connectivity
     try:
-        response = requests.get(f"{EOS_URL}/docs", timeout=5)
+        response = requests.get(f"{EOS_URL}{EOS_HEALTH_PATH}", timeout=EOS_HEALTH_TIMEOUT_S)
         response.raise_for_status()
         logger.success(f"✓ EOS is reachable at {EOS_URL}")
     except requests.exceptions.RequestException as e:
@@ -296,7 +324,7 @@ def main():
     # Connect to broker
     try:
         logger.info(f"Connecting to MQTT broker {MQTT_BROKER}:{MQTT_PORT}...")
-        client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+        client.connect(MQTT_BROKER, MQTT_PORT, keepalive=MQTT_KEEPALIVE_S)
     except Exception as e:
         logger.error(f"✗ Failed to connect to MQTT broker: {e}")
         sys.exit(1)

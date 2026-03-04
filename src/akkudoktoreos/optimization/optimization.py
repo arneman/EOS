@@ -52,6 +52,62 @@ class GeneticCommonSettings(SettingsBaseModel):
     )
 
 
+class MarketResponsiveSettings(SettingsBaseModel):
+    """Market-responsive behavior configuration."""
+
+    enabled: bool = Field(
+        default=False,
+        json_schema_extra={
+            "description": "Enable market-responsive penalties in optimization.",
+            "examples": [False],
+        },
+    )
+
+    penalty_factor: float = Field(
+        default=0.0,
+        ge=0.0,
+        json_schema_extra={
+            "description": "Penalty factor in EUR per Wh for grid consumption under high stress.",
+            "examples": [0.00001],
+        },
+    )
+
+    incentive_factor: float = Field(
+        default=0.0,
+        ge=0.0,
+        json_schema_extra={
+            "description": "Incentive factor in EUR per Wh for grid feed-in under high stress.",
+            "examples": [0.000005],
+        },
+    )
+
+    spot_price_weight: float = Field(
+        default=0.7,
+        ge=0.0,
+        json_schema_extra={
+            "description": "Weight for market price stress signal in combined market stress.",
+            "examples": [0.7],
+        },
+    )
+
+    co2_weight: float = Field(
+        default=0.3,
+        ge=0.0,
+        json_schema_extra={
+            "description": "Weight for CO2 stress signal in combined market stress.",
+            "examples": [0.3],
+        },
+    )
+
+    co2_prediction_key: Optional[str] = Field(
+        default="co2_intensity_g_per_kwh",
+        json_schema_extra={
+            "description": "Prediction key for CO2 intensity time series.",
+            "examples": ["co2_intensity_g_per_kwh"],
+        },
+    )
+
+
 class OptimizationCommonSettings(SettingsBaseModel):
     """General Optimization Configuration."""
 
@@ -87,6 +143,23 @@ class OptimizationCommonSettings(SettingsBaseModel):
         },
     )
 
+    market_responsive: Optional[MarketResponsiveSettings] = Field(
+        default=None,
+        json_schema_extra={
+            "description": "Market-responsive optimization settings.",
+            "examples": [
+                {
+                    "enabled": False,
+                    "penalty_factor": 0.0,
+                    "incentive_factor": 0.0,
+                    "spot_price_weight": 0.7,
+                    "co2_weight": 0.3,
+                    "co2_prediction_key": "co2_intensity_g_per_kwh",
+                }
+            ],
+        },
+    )
+
     # Computed fields
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -113,6 +186,8 @@ class OptimizationCommonSettings(SettingsBaseModel):
         if self.algorithm is not None:
             if self.algorithm.lower() == "genetic" and self.genetic is None:
                 self.genetic = GeneticCommonSettings()
+        if self.market_responsive is None:
+            self.market_responsive = MarketResponsiveSettings()
         return self
 
 

@@ -985,6 +985,40 @@ class GeneticOptimization(OptimizationBase):
                     abs(parameters.eauto.min_soc_percentage - ev_soc_percentage) * penalty
                 )
 
+        market_settings = self.config.optimization.market_responsive
+        if (
+            market_settings
+            and market_settings.enabled
+            and parameters.market_stress_signal is not None
+        ):
+            grid_consumption = np.array(
+                simulation_result.get("Netzbezug_Wh_pro_Stunde", []), dtype=float
+            )
+            grid_feedin = np.array(
+                simulation_result.get("Netzeinspeisung_Wh_pro_Stunde", []), dtype=float
+            )
+            stress_arr = np.array(parameters.market_stress_signal, dtype=float)
+
+            if stress_arr.size > start_hour:
+                stress_slice = stress_arr[start_hour : start_hour + grid_consumption.size]
+            else:
+                stress_slice = np.array([], dtype=float)
+
+            length = min(grid_consumption.size, grid_feedin.size, stress_slice.size)
+            if length > 0:
+                grid_consumption = np.nan_to_num(grid_consumption[:length], nan=0.0)
+                grid_feedin = np.nan_to_num(grid_feedin[:length], nan=0.0)
+                stress_slice = np.nan_to_num(stress_slice[:length], nan=0.0)
+
+                penalty_amt = np.sum(grid_consumption * stress_slice) * float(
+                    market_settings.penalty_factor
+                )
+                incentive_amt = np.sum(grid_feedin * stress_slice) * float(
+                    market_settings.incentive_factor
+                )
+                gesamtbilanz += penalty_amt
+                gesamtbilanz -= incentive_amt
+
         return (gesamtbilanz,)
 
     def optimize(
