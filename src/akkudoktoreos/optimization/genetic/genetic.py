@@ -1,5 +1,6 @@
 """Genetic algorithm."""
 
+import math
 import random
 import time
 from typing import Any, Optional
@@ -14,12 +15,15 @@ from akkudoktoreos.core.pydantic import PydanticBaseModel
 from akkudoktoreos.devices.genetic.battery import Battery
 from akkudoktoreos.devices.genetic.homeappliance import HomeAppliance
 from akkudoktoreos.devices.genetic.inverter import Inverter
+from akkudoktoreos.devices.devicesabc import HybridPVFeedInMode
+from akkudoktoreos.optimization.genetic.geneticdevices import HybridPVInverterParameters
 from akkudoktoreos.optimization.genetic.geneticparams import (
     GeneticEnergyManagementParameters,
     GeneticOptimizationParameters,
 )
 from akkudoktoreos.optimization.genetic.geneticsolution import (
     GeneticSimulationResult,
+    HybridPVInverterResult,
     GeneticSolution,
 )
 from akkudoktoreos.optimization.optimizationabc import OptimizationBase
@@ -1047,6 +1051,148 @@ class GeneticOptimization(OptimizationBase):
 
         return hof[0], member
 
+    def _hybrid_pv_forced_excess_mask(
+        self,
+        pv_energy_wh: np.ndarray,
+        min_production_threshold_w: float,
+        minutes_before_sunset: int,
+    ) -> np.ndarray:
+        """Create forced EXCESS mask based on low production and sunset proximity."""
+        interval_sec = self.config.optimization.interval or 3600
+        interval_h = interval_sec / 3600.0
+        interval_min = interval_sec / 60.0
+        threshold_wh = min_production_threshold_w * interval_h
+
+        forced_excess = pv_energy_wh <= threshold_wh
+
+        significant = np.where(pv_energy_wh > threshold_wh)[0]
+        if significant.size > 0:
+            last_prod_idx = int(significant[-1])
+            intervals_before_sunset = max(1, int(math.ceil(minutes_before_sunset / interval_min)))
+            force_from_idx = max(0, last_prod_idx - intervals_before_sunset + 1)
+            forced_excess[force_from_idx:] = True
+
+        return forced_excess
+
+    def _hybrid_pv_plan_single(
+        self,
+        inverter: HybridPVInverterParameters,
+        pv_energy_wh: np.ndarray,
+    ) -> HybridPVInverterResult:
+        """Build one hybrid PV inverter schedule with soft switching penalty."""
+        forced_excess = self._hybrid_pv_forced_excess_mask(
+            pv_energy_wh=pv_energy_wh,
+            min_production_threshold_w=inverter.min_production_threshold_w,
+            minutes_before_sunset=inverter.minutes_before_sunset,
+        )
+
+        prefer_full = inverter.feed_in_tariff_full_kwh > inverter.feed_in_tariff_excess_kwh
+        base_mode = HybridPVFeedInMode.FULL_FEED_IN if prefer_full else HybridPVFeedInMode.EXCESS
+
+        mode_schedule: list[str] = []
+        for idx, forced in enumerate(forced_excess):
+            if forced:
+                mode_schedule.append(HybridPVFeedInMode.EXCESS)
+                continue
+            if pv_energy_wh[idx] <= 0:
+                mode_schedule.append(HybridPVFeedInMode.EXCESS)
+                continue
+            mode_schedule.append(base_mode)
+
+        switch_count = 0
+        for i in range(1, len(mode_schedule)):
+            if mode_schedule[i] != mode_schedule[i - 1]:
+                switch_count += 1
+
+        interval_h = (self.config.optimization.interval or 3600) / 3600.0
+        standby_wh = inverter.standby_loss_w * interval_h
+
+        revenue_eur = 0.0
+        penalty_eur = 0.0
+        low_prod_full_streak = 0
+
+        for idx, mode in enumerate(mode_schedule):
+            pv_kwh = max(0.0, float(pv_energy_wh[idx])) / 1000.0
+
+            if mode == HybridPVFeedInMode.FULL_FEED_IN:
+                revenue_eur += pv_kwh * inverter.feed_in_tariff_full_kwh
+                if pv_energy_wh[idx] <= standby_wh:
+                    low_prod_full_streak += 1
+                    penalty_eur += (1.7**low_prod_full_streak - 1.0) * 0.01
+                else:
+                    low_prod_full_streak = 0
+            else:
+                revenue_eur += pv_kwh * inverter.feed_in_tariff_excess_kwh
+                low_prod_full_streak = 0
+
+        excess_switches = max(0, switch_count - inverter.max_mode_switches_per_day)
+        if excess_switches > 0:
+            penalty_eur += inverter.switch_penalty_base_eur * (
+                float(excess_switches) ** inverter.switch_penalty_exp
+            )
+
+        hours = max(1, int(round(len(mode_schedule) * interval_h)))
+        return HybridPVInverterResult(
+            device_id=inverter.device_id,
+            hours=hours,
+            mode_schedule=[str(m) for m in mode_schedule],
+            forced_excess=forced_excess.tolist(),
+            switch_count=switch_count,
+            estimated_revenue_eur=float(revenue_eur),
+            estimated_penalty_eur=float(penalty_eur),
+        )
+
+    def _build_hybrid_pv_plans(
+        self,
+        parameters: GeneticOptimizationParameters,
+    ) -> tuple[list[HybridPVInverterResult], float, float]:
+        """Create independent hybrid PV plans for configured inverters."""
+        if not parameters.hybrid_pv_inverters:
+            return ([], 0.0, 0.0)
+
+        total_pv_wh = np.array(parameters.ems.pv_prognose_wh, dtype=float)
+
+        interval_h = (self.config.optimization.interval or 3600) / 3600.0
+        horizon_hours = self.config.optimization.horizon_hours or len(total_pv_wh) * interval_h
+        horizon_len = min(len(total_pv_wh), max(1, int(round(horizon_hours / interval_h))))
+        total_pv_wh = total_pv_wh[:horizon_len]
+
+        explicit_share_sum = sum(
+            float(p.forecast_share)
+            for p in parameters.hybrid_pv_inverters
+            if p.forecast_share is not None
+        )
+        remaining_share = max(0.0, 1.0 - explicit_share_sum)
+        unspecified = [p for p in parameters.hybrid_pv_inverters if p.forecast_share is None]
+        total_unspecified_peak = sum(p.peakpower_kw for p in unspecified)
+
+        inverter_shares: dict[str, float] = {}
+        for inverter in parameters.hybrid_pv_inverters:
+            if inverter.forecast_share is not None:
+                inverter_shares[inverter.device_id] = float(inverter.forecast_share)
+                continue
+
+            if total_unspecified_peak > 0:
+                inverter_shares[inverter.device_id] = remaining_share * (
+                    inverter.peakpower_kw / total_unspecified_peak
+                )
+            else:
+                inverter_shares[inverter.device_id] = remaining_share / max(1, len(unspecified))
+
+        plans: list[HybridPVInverterResult] = []
+        total_revenue = 0.0
+        total_penalty = 0.0
+
+        for inverter in parameters.hybrid_pv_inverters:
+            share = inverter_shares.get(inverter.device_id, 0.0)
+            pv_energy_wh = np.maximum(0.0, total_pv_wh * share)
+            plan = self._hybrid_pv_plan_single(inverter=inverter, pv_energy_wh=pv_energy_wh)
+            plans.append(plan)
+            total_revenue += plan.estimated_revenue_eur
+            total_penalty += plan.estimated_penalty_eur
+
+        return plans, float(total_revenue), float(total_penalty)
+
     def optimierung_ems(
         self,
         parameters: GeneticOptimizationParameters,
@@ -1226,6 +1372,10 @@ class GeneticOptimization(OptimizationBase):
             error_msg = f"Visualization failed: {ex}"
             logger.error(error_msg)
 
+        hybrid_pv_plans, hybrid_pv_total_revenue, hybrid_pv_total_penalty = (
+            self._build_hybrid_pv_plans(parameters)
+        )
+
         return GeneticSolution(
             **{
                 "ac_charge": ac_charge_hours,
@@ -1236,5 +1386,12 @@ class GeneticOptimization(OptimizationBase):
                 "eauto_obj": self.simulation.ev,
                 "start_solution": start_solution,
                 "washingstart": washingstart_int,
+                "hybrid_pv_inverters": hybrid_pv_plans or None,
+                "hybrid_pv_total_revenue_eur": (
+                    hybrid_pv_total_revenue if hybrid_pv_plans else None
+                ),
+                "hybrid_pv_total_penalty_eur": (
+                    hybrid_pv_total_penalty if hybrid_pv_plans else None
+                ),
             }
         )

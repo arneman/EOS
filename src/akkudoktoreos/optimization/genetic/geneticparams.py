@@ -24,6 +24,7 @@ from akkudoktoreos.optimization.genetic.geneticabc import GeneticParametersBaseM
 from akkudoktoreos.optimization.genetic.geneticdevices import (
     ElectricVehicleParameters,
     HomeApplianceParameters,
+    HybridPVInverterParameters,
     InverterParameters,
     SolarPanelBatteryParameters,
 )
@@ -102,6 +103,7 @@ class GeneticOptimizationParameters(
     inverter: Optional[InverterParameters]
     eauto: Optional[ElectricVehicleParameters]
     dishwasher: Optional[HomeApplianceParameters] = None
+    hybrid_pv_inverters: Optional[list[HybridPVInverterParameters]] = None
     temperature_forecast: Optional[list[Optional[float]]] = Field(
         default=None,
         json_schema_extra={
@@ -628,6 +630,39 @@ class GeneticOptimizationParameters(
                     # Retry
                     continue
 
+            # Hybrid PV Inverters
+            # ------------------
+            hybrid_pv_inverter_params: list[HybridPVInverterParameters] = []
+            if cls.config.devices.max_hybrid_pv_inverters is None:
+                cls.config.devices.max_hybrid_pv_inverters = 0
+
+            if cls.config.devices.max_hybrid_pv_inverters > 0:
+                if cls.config.devices.hybrid_pv_inverters is None:
+                    logger.info(
+                        "No hybrid PV inverter data available, but max_hybrid_pv_inverters > 0. Falling back to empty list."
+                    )
+                    cls.config.devices.hybrid_pv_inverters = []
+
+                for hybrid_config in cls.config.devices.hybrid_pv_inverters[
+                    : cls.config.devices.max_hybrid_pv_inverters
+                ]:
+                    hybrid_pv_inverter_params.append(
+                        HybridPVInverterParameters(
+                            device_id=hybrid_config.device_id,
+                            peakpower_kw=hybrid_config.peakpower_kw,
+                            feed_in_tariff_full_kwh=hybrid_config.feed_in_tariff_full_kwh,
+                            feed_in_tariff_excess_kwh=hybrid_config.feed_in_tariff_excess_kwh,
+                            mode=hybrid_config.mode,
+                            max_mode_switches_per_day=hybrid_config.max_mode_switches_per_day,
+                            min_production_threshold_w=hybrid_config.min_production_threshold_w,
+                            minutes_before_sunset=hybrid_config.minutes_before_sunset,
+                            standby_loss_w=hybrid_config.standby_loss_w,
+                            switch_penalty_base_eur=hybrid_config.switch_penalty_base_eur,
+                            switch_penalty_exp=hybrid_config.switch_penalty_exp,
+                            forecast_share=hybrid_config.forecast_share,
+                        )
+                    )
+
             # We got all parameter data
             try:
                 oparams = GeneticOptimizationParameters(
@@ -643,6 +678,7 @@ class GeneticOptimizationParameters(
                     eauto=electric_vehicle_params,
                     inverter=inverter_params,
                     dishwasher=home_appliance_params,
+                    hybrid_pv_inverters=hybrid_pv_inverter_params or None,
                     start_solution=start_solution,
                 )
             except:

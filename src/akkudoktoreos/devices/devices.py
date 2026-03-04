@@ -14,7 +14,7 @@ from akkudoktoreos.core.cache import CacheFileStore
 from akkudoktoreos.core.coreabc import ConfigMixin, SingletonMixin
 from akkudoktoreos.core.emplan import ResourceStatus
 from akkudoktoreos.core.pydantic import ConfigDict, PydanticBaseModel
-from akkudoktoreos.devices.devicesabc import DevicesBaseSettings
+from akkudoktoreos.devices.devicesabc import DevicesBaseSettings, HybridPVFeedInMode
 from akkudoktoreos.utils.datetimeutil import DateTime, TimeWindowSequence, to_datetime
 
 # Default charge rates for battery
@@ -274,6 +274,118 @@ class HomeApplianceCommonSettings(DevicesBaseSettings):
         return keys
 
 
+class HybridPVInverterCommonSettings(DevicesBaseSettings):
+    """Hybrid PV inverter settings with dynamic feed-in mode switching."""
+
+    peakpower_kw: float = Field(
+        gt=0,
+        json_schema_extra={
+            "description": "Nominal peak power of the PV plant [kWp].",
+            "examples": [4.875],
+        },
+    )
+
+    feed_in_tariff_full_kwh: float = Field(
+        ge=0,
+        json_schema_extra={
+            "description": "Feed-in tariff for full feed-in mode [€/kWh].",
+            "examples": [0.12],
+        },
+    )
+
+    feed_in_tariff_excess_kwh: float = Field(
+        ge=0,
+        json_schema_extra={
+            "description": "Feed-in tariff for excess feed-in mode [€/kWh].",
+            "examples": [0.082],
+        },
+    )
+
+    mode: HybridPVFeedInMode = Field(
+        default=HybridPVFeedInMode.EXCESS,
+        json_schema_extra={
+            "description": "Default feed-in mode.",
+            "examples": ["EXCESS", "FULL_FEED_IN"],
+        },
+    )
+
+    max_mode_switches_per_day: int = Field(
+        default=6,
+        ge=0,
+        json_schema_extra={
+            "description": "Soft limit for feed-in mode switches per 24h period.",
+            "examples": [6],
+        },
+    )
+
+    min_production_threshold_w: float = Field(
+        default=10.0,
+        ge=0,
+        json_schema_extra={
+            "description": "If production is below this threshold, EXCESS mode is forced [W].",
+            "examples": [10.0],
+        },
+    )
+
+    minutes_before_sunset: int = Field(
+        default=30,
+        ge=0,
+        json_schema_extra={
+            "description": "Force EXCESS mode this many minutes before sunset.",
+            "examples": [30],
+        },
+    )
+
+    standby_loss_w: float = Field(
+        default=1.0,
+        ge=0,
+        json_schema_extra={
+            "description": "Inverter standby power loss while in full feed-in mode [W].",
+            "examples": [1.0],
+        },
+    )
+
+    switch_penalty_base_eur: float = Field(
+        default=0.02,
+        ge=0,
+        json_schema_extra={
+            "description": "Base penalty for switching above soft limit [€].",
+            "examples": [0.02],
+        },
+    )
+
+    switch_penalty_exp: float = Field(
+        default=1.8,
+        ge=1.0,
+        json_schema_extra={
+            "description": "Exponent for increasing switch penalty.",
+            "examples": [1.8, 2.0],
+        },
+    )
+
+    forecast_share: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        json_schema_extra={
+            "description": "Optional explicit share [0..1] of total PV forecast assigned to this plant.",
+            "examples": [0.35, None],
+        },
+    )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def measurement_key_power_w(self) -> str:
+        """Measurement key of instantaneous plant AC power [W]."""
+        return f"{self.device_id}-power-w"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def measurement_keys(self) -> Optional[list[str]]:
+        """Measurement keys for this hybrid PV inverter."""
+        return [self.measurement_key_power_w]
+
+
 class DevicesCommonSettings(SettingsBaseModel):
     """Base configuration for devices simulation settings."""
 
@@ -337,6 +449,23 @@ class DevicesCommonSettings(SettingsBaseModel):
         },
     )
 
+    hybrid_pv_inverters: Optional[list[HybridPVInverterCommonSettings]] = Field(
+        default=None,
+        json_schema_extra={
+            "description": "List of hybrid PV inverters that can switch between full and excess feed-in.",
+            "examples": [[{"device_id": "pv1", "peakpower_kw": 4.875}]],
+        },
+    )
+
+    max_hybrid_pv_inverters: Optional[int] = Field(
+        default=None,
+        ge=0,
+        json_schema_extra={
+            "description": "Maximum number of hybrid PV inverters that can be set",
+            "examples": [4],
+        },
+    )
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def measurement_keys(self) -> Optional[list[str]]:
@@ -349,6 +478,9 @@ class DevicesCommonSettings(SettingsBaseModel):
         if self.max_electric_vehicles and self.electric_vehicles:
             for electric_vehicle in self.electric_vehicles:
                 keys.extend(electric_vehicle.measurement_keys)
+        if self.max_hybrid_pv_inverters and self.hybrid_pv_inverters:
+            for hybrid_pv_inverter in self.hybrid_pv_inverters:
+                keys.extend(hybrid_pv_inverter.measurement_keys)
         return keys
 
 

@@ -692,7 +692,7 @@ def fastapi_measurement_value_put(
             logger.debug(
                 f'/v1/measurement/value key: {key} value: "{value}" - string value not convertable to float'
             )
-    get_measurement().update_value(datetime, key, value)
+    get_measurement().update_value(to_datetime(datetime), key, value)
     pdseries = get_measurement().key_to_series(key=key)
     return PydanticDateTimeSeries.from_series(pdseries)
 

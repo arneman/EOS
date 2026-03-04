@@ -82,6 +82,31 @@ class ElectricVehicleResult(DeviceOptimizeResult):
         return NumpyEncoder.convert_numpy(field)[0]
 
 
+class HybridPVInverterResult(DeviceOptimizeResult):
+    """Optimized mode schedule for one hybrid PV inverter."""
+
+    mode_schedule: list[str] = Field(
+        json_schema_extra={
+            "description": "Mode schedule per optimization interval using EXCESS or FULL_FEED_IN."
+        }
+    )
+    forced_excess: list[bool] = Field(
+        json_schema_extra={"description": "Intervals where EXCESS was enforced by constraints."}
+    )
+    switch_count: int = Field(
+        ge=0,
+        json_schema_extra={"description": "Number of mode transitions in the schedule."},
+    )
+    estimated_revenue_eur: float = Field(
+        json_schema_extra={"description": "Estimated feed-in revenue [€] for this inverter."}
+    )
+    estimated_penalty_eur: float = Field(
+        json_schema_extra={
+            "description": "Estimated switching/standby penalty [€] for this inverter."
+        }
+    )
+
+
 class GeneticSimulationResult(GeneticParametersBaseModel):
     """This object contains the results of the simulation and provides insights into various parameters over the entire forecast period."""
 
@@ -178,6 +203,22 @@ class GeneticSolution(ConfigMixin, GeneticParametersBaseModel):
         default=None,
         json_schema_extra={
             "description": "Can be `null` or contain an object representing the start of washing (if applicable)."
+        },
+    )
+    hybrid_pv_inverters: Optional[list[HybridPVInverterResult]] = Field(
+        default=None,
+        json_schema_extra={"description": "Optional optimized schedules for hybrid PV inverters."},
+    )
+    hybrid_pv_total_revenue_eur: Optional[float] = Field(
+        default=None,
+        json_schema_extra={
+            "description": "Total estimated feed-in revenue across hybrid PV inverters [€]."
+        },
+    )
+    hybrid_pv_total_penalty_eur: Optional[float] = Field(
+        default=None,
+        json_schema_extra={
+            "description": "Total estimated penalty across hybrid PV inverters [€]."
         },
     )
 

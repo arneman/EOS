@@ -46,6 +46,7 @@ dependencies = [
     "linkify-it-py==2.1.0",
     "loguru==0.7.3",
     "lmdb==1.7.5",
+    "paho-mqtt>=2.1.0",
 ]
 
 [project.optional-dependencies]
