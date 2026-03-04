@@ -25,6 +25,7 @@ Usage:
 
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from typing import Dict, Optional
@@ -130,41 +131,70 @@ battery_power_last_update = 0.0
 eos_last_values: Dict[str, Optional[float]] = {}  # key -> last sent value
 eos_last_timestamps: Dict[str, float] = {}  # key -> last send timestamp
 
+# Flag to control background repeat thread
+repeat_thread_running = False
+repeat_thread: Optional[threading.Thread] = None
+
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
 
 
-def send_to_eos(key: str, value: float, description: str = "") -> bool:
-    """Send measurement value to EOS via REST API.
+def send_measurement_to_eos(
+    key: str,
+    value: float,
+    description: str = "",
+    force: bool = False,
+    source: str = "",
+    value_formatted: Optional[str] = None,
+) -> bool:
+    """Send measurement value to EOS via REST API with unified deduplication.
     
-    Only sends if:
+    Sends if:
     - Value changed from last sent value, OR
-    - 60 seconds have passed since last send
-
+    - 60 seconds have passed since last send, OR
+    - force=True (bypass all checks)
+    
     Args:
         key: EOS measurement key
-        value: Measurement value
-        description: Optional description for logging
-
+        value: Measurement value (float)
+        description: Human-readable description for logging
+        force: Force send even if value unchanged or time threshold not met
+        source: Optional source prefix for logging (e.g., "mqtt", "repeat")
+        value_formatted: Optional pre-formatted value string for logging (e.g., "85.0%", "2500W")
+    
     Returns:
-        True if successful, False otherwise
+        True if successful or skipped, False on HTTP error
     """
     now_ts = time.time()
-    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]  # ISO 8601 with milliseconds
+    now = datetime.now().astimezone().isoformat(timespec='seconds')
     
     # Check if value changed or 60 seconds passed
     last_value = eos_last_values.get(key)
     last_send_ts = eos_last_timestamps.get(key, 0)
     time_since_last_send = now_ts - last_send_ts
     
-    # Send if: value changed OR 60+ seconds passed
-    if last_value != value and last_value is not None:
-        logger.debug(f"Value changed: {key}: {last_value} → {value}")
-    elif time_since_last_send < EOS_SEND_INTERVAL_S:
-        # Same value and less than 60 seconds - skip
-        logger.trace(f"Skipping {key}={value} (unchanged, {time_since_last_send:.0f}s since last send)")
+    # Determine if we should send
+    should_send = force
+    skip_reason = None
+    
+    if not should_send:
+        if last_value is None:
+            # First time sending this key
+            should_send = True
+        elif last_value != value:
+            # Value changed
+            logger.debug(f"Value changed: {key}: {last_value} → {value}")
+            should_send = True
+        elif time_since_last_send >= EOS_SEND_INTERVAL_S:
+            # 60 seconds passed
+            should_send = True
+        else:
+            skip_reason = f"unchanged, {time_since_last_send:.0f}s since last send"
+    
+    if not should_send:
+        logger.trace(f"Skipping {key}={value} ({skip_reason})")
         return True  # Not an error, just skipped
     
     try:
@@ -179,11 +209,62 @@ def send_to_eos(key: str, value: float, description: str = "") -> bool:
         eos_last_values[key] = value
         eos_last_timestamps[key] = now_ts
         
-        logger.debug(f"✓ EOS: {key}={value:.3f} ({description}) → {response.status_code}")
+        # Unified logging with optional source prefix
+        log_prefix = f"({source})" if source else ""
+        log_value = value_formatted if value_formatted else f"{value:.1f}"
+        logger.info(f"{log_prefix} ✓ {description}: {log_value}")
+        logger.debug(f"EOS: {key}={value:.3f} → {response.status_code}")
+        
         return True
     except requests.exceptions.RequestException as e:
         logger.error(f"✗ Failed to send {key}={value} to EOS: {e}")
         return False
+
+
+def repeat_all_values():
+    """Background thread that resends all cached values every 60 seconds."""
+    logger.info("Starting value repeat timer (every 60s)...")
+    while repeat_thread_running:
+        try:
+            time.sleep(EOS_SEND_INTERVAL_S)
+            if not repeat_thread_running:
+                break
+            
+            logger.debug("(60s timer) Resending all cached values...")
+            
+            # Resend all cached SOC values
+            for topic, config in TOPIC_MAPPING.items():
+                key = config["eos_key"]
+                if key in eos_last_values and eos_last_values[key] is not None:
+                    value = eos_last_values[key]
+                    # For SOC values, format as percentage
+                    value_formatted = f"{value:.1%}"
+                    send_measurement_to_eos(
+                        key,
+                        value,
+                        config["description"],
+                        force=True,
+                        source="repeat",
+                        value_formatted=value_formatted,
+                    )
+            
+            # Resend battery power if we have both values
+            if None not in battery_power_cache.values():
+                total_power = sum(battery_power_cache.values())
+                if BATTERY_POWER_EOS_KEY in eos_last_values and eos_last_values[BATTERY_POWER_EOS_KEY] is not None:
+                    # Format battery power with direction
+                    direction = 'charging' if total_power > 0 else 'discharging' if total_power < 0 else 'idle'
+                    value_formatted = f"{total_power:.1f}W ({direction})"
+                    send_measurement_to_eos(
+                        BATTERY_POWER_EOS_KEY,
+                        total_power,
+                        "Battery Power",
+                        force=True,
+                        source="repeat",
+                        value_formatted=value_formatted,
+                    )
+        except Exception as e:
+            logger.error(f"Error in repeat thread: {e}")
 
 
 def process_battery_power():
@@ -203,24 +284,22 @@ def process_battery_power():
 
     # Avoid sending duplicate values too frequently (debouncing)
     now = time.time()
-    if now - battery_power_last_update < BATTERY_POWER_DEBOUNCE_S:  # Min seconds between updates
+    if now - battery_power_last_update < BATTERY_POWER_DEBOUNCE_S:
         return
 
     battery_power_last_update = now
 
-    # Send to EOS
-    success = send_to_eos(
+    # Format power value with direction
+    direction = 'charging' if total_power > 0 else 'discharging' if total_power < 0 else 'idle'
+    value_formatted = f"{total_power:.1f}W ({direction})"
+    
+    send_measurement_to_eos(
         BATTERY_POWER_EOS_KEY,
         total_power,
-        f"Battery Power (victron:{battery_power_cache[TOPIC_BATTERY_POWER_1]:.1f}W + "
-        f"victron2:{battery_power_cache[TOPIC_BATTERY_POWER_2]:.1f}W)",
+        "Battery Power",
+        source="mqtt",
+        value_formatted=value_formatted,
     )
-
-    if success:
-        logger.info(
-            f"Battery Power: {total_power:.1f}W "
-            f"({'charging' if total_power > 0 else 'discharging' if total_power < 0 else 'idle'})"
-        )
 
 
 # =============================================================================
@@ -261,8 +340,16 @@ def on_message(client, userdata, msg):
             config = TOPIC_MAPPING[topic]
             raw_value = float(payload)
             converted_value = config["converter"](raw_value)
-
-            send_to_eos(config["eos_key"], converted_value, config["description"])
+            
+            # Format SOC value as percentage
+            value_formatted = f"{converted_value:.1%}"
+            send_measurement_to_eos(
+                config["eos_key"],
+                converted_value,
+                config["description"],
+                source="mqtt",
+                value_formatted=value_formatted,
+            )
 
         # Handle battery power topics (need to sum two values)
         elif topic in battery_power_cache:
@@ -329,13 +416,22 @@ def main():
         logger.error(f"✗ Failed to connect to MQTT broker: {e}")
         sys.exit(1)
 
+    # Start background repeat thread
+    global repeat_thread_running, repeat_thread
+    repeat_thread_running = True
+    repeat_thread = threading.Thread(target=repeat_all_values, daemon=True)
+    repeat_thread.start()
+    
     # Start MQTT loop
     logger.info("Starting MQTT loop... (Press Ctrl+C to exit)")
     try:
         client.loop_forever()
     except KeyboardInterrupt:
         logger.info("Shutting down...")
+        repeat_thread_running = False
         client.disconnect()
+        if repeat_thread:
+            repeat_thread.join(timeout=2)
         logger.success("Bridge stopped.")
 
 
