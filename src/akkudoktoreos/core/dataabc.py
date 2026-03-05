@@ -853,12 +853,17 @@ class DataSequence(DataABC, DatabaseRecordProtocolMixin[DataRecord]):
     ) -> Optional[float]:
         """Returns the value corresponding to the specified key that is nearest to the given datetime.
 
+        Only records that have a non-None value for ``key`` are considered. This is important when
+        multiple measurement keys share the same sequence but are written at different timestamps
+        (e.g. SoC once per minute vs. power every second). Without this filter the nearest-timestamp
+        record might be one that carries a different key and has ``None`` for the requested one.
+
         Args:
             key (str): The key of the attribute in DataRecord to extract.
             target_datetime (datetime): The datetime to search for.
             time_window: Optional total width of the symmetric search window centered on
                 ``target_datetime``. If provided and no exact match exists, the nearest
-                record within this window is returned.
+                record **that has a non-None value for key** within this window is returned.
 
         Returns:
             Optional[float]: The value nearest to the given datetime, or None if no valid records are found.
@@ -869,11 +874,32 @@ class DataSequence(DataABC, DatabaseRecordProtocolMixin[DataRecord]):
         self._validate_key(key)
 
         # Ensure datetime objects are normalized
-        db_target = DatabaseTimestamp.from_datetime(to_datetime(target_datetime))
+        target_dt = to_datetime(target_datetime)
+        db_target = DatabaseTimestamp.from_datetime(target_dt)
 
-        record = self.db_get_record(db_target, time_window=time_window)
+        # Fast path: exact-timestamp match – only accept if value is set
+        exact_record = self.db_get_record(db_target)
+        if exact_record is not None:
+            val = getattr(exact_record, key, None)
+            if val is not None:
+                return val
 
-        return getattr(record, key, None)
+        if time_window is None:
+            return None
+
+        # Nearest-neighbour search restricted to records that actually carry the key.
+        # key_to_lists with dropna=True returns only records where the value is non-None.
+        half_seconds = to_duration(time_window).total_seconds() / 2
+        start_dt = target_dt.subtract(seconds=int(half_seconds))
+        end_dt = target_dt.add(seconds=int(half_seconds))
+        dates, values = self.key_to_lists(
+            key=key, start_datetime=start_dt, end_datetime=end_dt, dropna=True
+        )
+        if not dates:
+            return None
+        target_ts = target_dt.timestamp()
+        nearest_idx = min(range(len(dates)), key=lambda i: abs(dates[i].timestamp() - target_ts))
+        return values[nearest_idx]
 
     def key_to_lists(
         self,
