@@ -263,3 +263,6 @@ tests/testdata/config-new.md
 
 # FastHTML session key
 .sesskey
+
+# Local MQTT bridge secret
+.mqtt_password
