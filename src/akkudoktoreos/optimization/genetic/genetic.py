@@ -1019,6 +1019,35 @@ class GeneticOptimization(OptimizationBase):
                 gesamtbilanz += penalty_amt
                 gesamtbilanz -= incentive_amt
 
+                pv_charge_penalty_factor = float(
+                    getattr(market_settings, "pv_charge_penalty_factor", 0.0)
+                )
+                low_stress_reward_factor = float(
+                    getattr(market_settings, "low_stress_charge_reward_factor", 0.0)
+                )
+                if (
+                    pv_charge_penalty_factor > 0.0 or low_stress_reward_factor > 0.0
+                ) and self.simulation.battery:
+                    soc_arr = np.array(
+                        simulation_result.get("akku_soc_pro_stunde", []), dtype=float
+                    )
+                    if soc_arr.size >= length:
+                        soc_slice = np.nan_to_num(soc_arr[:length], nan=soc_arr[0])
+                        soc_next = np.roll(soc_slice, -1)
+                        soc_next[-1] = soc_slice[-1]
+                        delta_soc = soc_next - soc_slice
+                        charged_wh = np.maximum(0.0, delta_soc) * (
+                            self.simulation.battery.capacity_wh / 100.0
+                        )
+                        if pv_charge_penalty_factor > 0.0:
+                            gesamtbilanz += (
+                                np.sum(charged_wh * stress_slice) * pv_charge_penalty_factor
+                            )
+                        if low_stress_reward_factor > 0.0:
+                            gesamtbilanz -= (
+                                np.sum(charged_wh * (1.0 - stress_slice)) * low_stress_reward_factor
+                            )
+
         return (gesamtbilanz,)
 
     def optimize(
@@ -1306,6 +1335,17 @@ class GeneticOptimization(OptimizationBase):
                 ]
         else:
             self.optimize_ev = False
+
+        market_settings = self.config.optimization.market_responsive
+        self.optimize_dc_charge = bool(
+            market_settings
+            and market_settings.enabled
+            and float(getattr(market_settings, "pv_charge_penalty_factor", 0.0)) > 0.0
+        )
+        if self.optimize_dc_charge:
+            logger.info(
+                "Market-responsive mode: DC charging optimization enabled (PV charging can be restricted by optimizer)."
+            )
 
         # Initialize household appliance if applicable
         dishwasher = (

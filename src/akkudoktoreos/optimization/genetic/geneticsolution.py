@@ -355,6 +355,41 @@ class GeneticSolution(ConfigMixin, GeneticParametersBaseModel):
             index=time_index,
         )
 
+        if self.hybrid_pv_inverters:
+            for inverter in self.hybrid_pv_inverters:
+                mode_schedule: list[str] = list(inverter.mode_schedule or [])
+                forced_excess: list[bool] = list(inverter.forced_excess or [])
+
+                if mode_schedule:
+                    if len(mode_schedule) < n_points:
+                        mode_schedule = mode_schedule + [mode_schedule[-1]] * (
+                            n_points - len(mode_schedule)
+                        )
+                    else:
+                        mode_schedule = mode_schedule[:n_points]
+                else:
+                    mode_schedule = ["EXCESS"] * n_points
+
+                if forced_excess:
+                    if len(forced_excess) < n_points:
+                        forced_excess = forced_excess + [forced_excess[-1]] * (
+                            n_points - len(forced_excess)
+                        )
+                    else:
+                        forced_excess = forced_excess[:n_points]
+                else:
+                    forced_excess = [False] * n_points
+
+                solution[f"hybrid_pv_{inverter.device_id}_mode_excess_op_mode"] = [
+                    1.0 if mode == "EXCESS" else 0.0 for mode in mode_schedule
+                ]
+                solution[f"hybrid_pv_{inverter.device_id}_mode_full_feed_in_op_mode"] = [
+                    1.0 if mode == "FULL_FEED_IN" else 0.0 for mode in mode_schedule
+                ]
+                solution[f"hybrid_pv_{inverter.device_id}_forced_excess_op_mode"] = [
+                    1.0 if bool(flag) else 0.0 for flag in forced_excess
+                ]
+
         # Add battery data
         solution["battery1_soc_factor"] = [
             v / 100

@@ -81,6 +81,24 @@ class MarketResponsiveSettings(SettingsBaseModel):
         },
     )
 
+    pv_charge_penalty_factor: float = Field(
+        default=0.0,
+        ge=0.0,
+        json_schema_extra={
+            "description": "Penalty factor in EUR per Wh for charging the battery during high market stress.",
+            "examples": [0.000005],
+        },
+    )
+
+    low_stress_charge_reward_factor: float = Field(
+        default=0.0,
+        ge=0.0,
+        json_schema_extra={
+            "description": "Reward factor in EUR per Wh for charging the battery during low market stress.",
+            "examples": [0.00001],
+        },
+    )
+
     spot_price_weight: float = Field(
         default=0.7,
         ge=0.0,
