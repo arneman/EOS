@@ -7,6 +7,9 @@ from akkudoktoreos.core.coreabc import get_prediction
 from akkudoktoreos.prediction.feedintariffabc import FeedInTariffProvider
 from akkudoktoreos.prediction.feedintarifffixed import FeedInTariffFixedCommonSettings
 from akkudoktoreos.prediction.feedintariffimport import FeedInTariffImportCommonSettings
+from akkudoktoreos.prediction.feedintariffmarketprice import (
+    FeedInTariffMarketPriceCommonSettings,
+)
 
 
 def elecprice_provider_ids() -> list[str]:
@@ -35,6 +38,13 @@ class FeedInTariffCommonProviderSettings(SettingsBaseModel):
     FeedInTariffImport: Optional[FeedInTariffImportCommonSettings] = Field(
         default=None,
         json_schema_extra={"description": "FeedInTariffImport settings", "examples": [None]},
+    )
+    FeedInTariffMarketPrice: Optional[FeedInTariffMarketPriceCommonSettings] = Field(
+        default=None,
+        json_schema_extra={
+            "description": "FeedInTariffMarketPrice settings",
+            "examples": [None],
+        },
     )
 
 
