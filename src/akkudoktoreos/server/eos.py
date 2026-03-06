@@ -523,7 +523,7 @@ def fastapi_config_put_key(
     value: Optional[Any] = Body(
         None, description="The value to assign to the specified configuration path (can be None)."
     ),
-) -> ConfigEOS:
+) -> dict[str, Any]:
     """Update a nested key or index in the config model.
 
     Args:
@@ -531,8 +531,16 @@ def fastapi_config_put_key(
         value (Any): The new value to assign to the key or index at path.
 
     Returns:
-        configuration (ConfigEOS): The current configuration after the update.
+        dict[str, Any]: A concise update result with path and effective value.
     """
+    old_value: Any = None
+    old_value_available = True
+    try:
+        old_value = get_config().get_nested_value(path)
+    except Exception:
+        # Path might not exist yet (e.g., index append style on some fields).
+        old_value_available = False
+
     try:
         get_config().set_nested_value(path, value)
     except Exception as e:
@@ -542,7 +550,14 @@ def fastapi_config_put_key(
             detail=f"Error on update of configuration '{path}','{value}': {e}\n{trace}",
         )
 
-    return get_config()
+    new_value = get_config().get_nested_value(path)
+    return {
+        "status": "updated",
+        "path": path,
+        "old_value": old_value if old_value_available else None,
+        "new_value": new_value,
+        "message": f"Configuration '{path}' updated successfully.",
+    }
 
 
 @app.get("/v1/config/{path:path}", tags=["config"])
