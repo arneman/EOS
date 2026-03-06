@@ -41,6 +41,17 @@ class GeneticCommonSettings(SettingsBaseModel):
         },
     )
 
+    optimize_dc_charge: Optional[bool] = Field(
+        default=False,
+        json_schema_extra={
+            "description": (
+                "If true, optimize DC charge permission per hour instead of allowing DC charging "
+                "for all hours."
+            ),
+            "examples": [False, True],
+        },
+    )
+
     penalties: Optional[dict[str, Union[float, int, str]]] = Field(
         default=None,
         json_schema_extra={

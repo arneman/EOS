@@ -208,6 +208,7 @@ class GeneticOptimizationParameters(
                 "individuals": 300,
                 "generations": 400,
                 "seed": None,
+                "optimize_dc_charge": False,
                 "penalties": {
                     "ev_soc_miss": 10,
                 },
@@ -218,6 +219,9 @@ class GeneticOptimizationParameters(
         if cls.config.optimization.genetic.generations is None:
             logger.info("Genetic generations unknown - defaulting to 400.")
             cls.config.optimization.genetic.generations = 400
+        if cls.config.optimization.genetic.optimize_dc_charge is None:
+            logger.info("Genetic optimize_dc_charge unknown - defaulting to False.")
+            cls.config.optimization.genetic.optimize_dc_charge = False
         if cls.config.optimization.genetic.penalties is None:
             logger.info("Genetic penalties unknown - defaulting to demo config.")
             cls.config.optimization.genetic.penalties = {"ev_soc_miss": 10}
@@ -229,6 +233,9 @@ class GeneticOptimizationParameters(
             # charging at a price that cannot be recovered given the round-trip efficiency
             # and the best available future discharge price (after free PV energy is used).
             cls.config.optimization.genetic.penalties["ac_charge_break_even"] = 1.0
+        if "dc_charge_feed_in_opportunity" not in cls.config.optimization.genetic.penalties:
+            # Default 0.0 keeps legacy behavior unless explicitly enabled by configuration.
+            cls.config.optimization.genetic.penalties["dc_charge_feed_in_opportunity"] = 0.0
 
         # Get start solution from last run
         start_solution = None

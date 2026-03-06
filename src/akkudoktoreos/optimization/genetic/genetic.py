@@ -439,7 +439,10 @@ class GeneticOptimization(OptimizationBase):
         self.verbose = verbose
         self.fix_seed = fixed_seed
         self.optimize_ev = True
-        self.optimize_dc_charge = False
+        optimize_dc_charge = False
+        if self.config.optimization.genetic is not None:
+            optimize_dc_charge = bool(self.config.optimization.genetic.optimize_dc_charge)
+        self.optimize_dc_charge = optimize_dc_charge
         self.fitness_history: dict[str, Any] = {}
 
         # Set a fixed seed for random operations if provided or in debug mode
@@ -962,6 +965,63 @@ class GeneticOptimization(OptimizationBase):
                         ac_wh = dc_wh / max(inv.ac_to_dc_efficiency, 1e-9)
                         excess_cost_per_wh = break_even_price - best_uncovered_price
                         gesamtbilanz += ac_wh * excess_cost_per_wh * ac_penalty_factor
+
+        # --- DC charging feed-in opportunity-cost penalty ---
+        # Charge from PV should be economically more attractive in hours with lower
+        # feed-in tariff, because charging in high feed-in hours sacrifices export revenue.
+        if (
+            self.simulation.battery
+            and self.simulation.dc_charge_hours is not None
+            and self.simulation.ac_charge_hours is not None
+            and self.simulation.elect_revenue_per_hour_arr is not None
+            and self.simulation.pv_prediction_wh is not None
+            and self.simulation.load_energy_array is not None
+        ):
+            try:
+                dc_opportunity_factor = float(
+                    self.config.optimization.genetic.penalties["dc_charge_feed_in_opportunity"]
+                )
+            except Exception:
+                dc_opportunity_factor = 0.0
+
+            if dc_opportunity_factor > 0.0:
+                dc_charge_arr = self.simulation.dc_charge_hours
+                ac_charge_arr = self.simulation.ac_charge_hours
+                feed_in_arr = self.simulation.elect_revenue_per_hour_arr
+                pv_arr = self.simulation.pv_prediction_wh
+                load_arr = self.simulation.load_energy_array
+
+                horizon_end = min(
+                    len(dc_charge_arr),
+                    len(ac_charge_arr),
+                    len(feed_in_arr),
+                    len(pv_arr),
+                    len(load_arr),
+                )
+
+                if start_hour < horizon_end:
+                    # Reference price: lowest feed-in tariff in the optimization horizon.
+                    feed_in_ref = float(np.min(feed_in_arr[start_hour:horizon_end]))
+                    battery = self.simulation.battery
+
+                    for hour in range(start_hour, horizon_end):
+                        # Skip if AC charging dominates this hour; AC already has own penalty.
+                        if ac_charge_arr[hour] > 0.0:
+                            continue
+                        dc_factor = float(dc_charge_arr[hour])
+                        if dc_factor <= 0.0:
+                            continue
+
+                        # Apply only in potential PV surplus hours.
+                        if pv_arr[hour] <= load_arr[hour]:
+                            continue
+
+                        feed_in_excess = max(0.0, float(feed_in_arr[hour]) - feed_in_ref)
+                        if feed_in_excess <= 0.0:
+                            continue
+
+                        dc_wh = battery.max_charge_power_w * dc_factor
+                        gesamtbilanz += dc_wh * feed_in_excess * dc_opportunity_factor
 
         if self.optimize_ev and parameters.eauto and self.simulation.ev:
             try:
