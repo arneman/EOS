@@ -274,6 +274,36 @@ class HomeApplianceCommonSettings(DevicesBaseSettings):
         return keys
 
 
+class ElectricVehicleCommonSettings(BatteriesCommonSettings):
+    """Electric vehicle settings with optional target SOC deadline in local time."""
+
+    target_soc_percentage: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        json_schema_extra={
+            "description": "Optional EV target state of charge [%] to be reached around target_soc_time.",
+            "examples": [90, None],
+        },
+    )
+
+    target_soc_time: Optional[str] = Field(
+        default=None,
+        json_schema_extra={
+            "description": "Optional EV target deadline as local time 'HH:MM' (24h).",
+            "examples": ["09:00", None],
+        },
+    )
+
+    @field_validator("target_soc_time")
+    def validate_target_soc_time(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) is None:
+            raise ValueError("target_soc_time must be in format HH:MM (24h), e.g. '09:00'.")
+        return value
+
+
 class DevicesCommonSettings(SettingsBaseModel):
     """Base configuration for devices simulation settings."""
 
@@ -294,7 +324,7 @@ class DevicesCommonSettings(SettingsBaseModel):
         },
     )
 
-    electric_vehicles: Optional[list[BatteriesCommonSettings]] = Field(
+    electric_vehicles: Optional[list[ElectricVehicleCommonSettings]] = Field(
         default=None,
         json_schema_extra={
             "description": "List of electric vehicle devices",

@@ -497,6 +497,8 @@ class GeneticOptimizationParameters(
                         max_charge_power_w=electric_vehicle_config.max_charge_power_w,
                         min_soc_percentage=electric_vehicle_config.min_soc_percentage,
                         max_soc_percentage=electric_vehicle_config.max_soc_percentage,
+                        target_soc_percentage=electric_vehicle_config.target_soc_percentage,
+                        target_soc_time=electric_vehicle_config.target_soc_time,
                     )
                 except:
                     logger.info(

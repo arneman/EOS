@@ -111,6 +111,22 @@ class ElectricVehicleParameters(BaseBatteryParameters):
     initial_soc_percentage: int = initial_soc_percentage_field(
         "An integer representing the current state of charge (SOC) of the battery in percentage."
     )
+    target_soc_percentage: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        json_schema_extra={
+            "description": "Optional target SOC [%] for deadline-based EV charging.",
+            "examples": [90, None],
+        },
+    )
+    target_soc_time: Optional[str] = Field(
+        default=None,
+        json_schema_extra={
+            "description": "Optional EV target deadline in local time as 'HH:MM' (24h).",
+            "examples": ["09:00", None],
+        },
+    )
 
 
 class HomeApplianceParameters(DeviceParameters):
