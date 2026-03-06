@@ -44,6 +44,21 @@ class TestServer:
         assert str(data_folder_path).startswith(eos_dir)
         assert str(data_ouput_path).startswith(eos_dir)
 
+    def test_energy_management_run_trigger_endpoint(self, server_setup_for_class):
+        """Trigger an immediate EMS run asynchronously via API."""
+        server = server_setup_for_class["server"]
+
+        # Use prediction mode to keep runtime short and deterministic.
+        result = requests.post(
+            f"{server}/v1/energy-management/run",
+            params={"mode": "PREDICTION", "force_update": "false", "force_enable": "false"},
+            timeout=30,
+        )
+        assert result.status_code in (HTTPStatus.ACCEPTED, HTTPStatus.CONFLICT)
+        if result.status_code == HTTPStatus.ACCEPTED:
+            payload = result.json()
+            assert payload["status"] == "accepted"
+
 
 class TestServerStartStop:
 

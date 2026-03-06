@@ -38,6 +38,7 @@ from akkudoktoreos.core.coreabc import (
 )
 from akkudoktoreos.core.emplan import EnergyManagementPlan, ResourceStatus
 from akkudoktoreos.core.ems import ems_manage_energy
+from akkudoktoreos.core.ems import EnergyManagementStage
 from akkudoktoreos.core.emsettings import EnergyManagementMode
 from akkudoktoreos.core.logging import logging_track_config, read_file_log
 from akkudoktoreos.core.pydantic import (
@@ -988,6 +989,74 @@ def fastapi_energy_management_optimization_solution_get() -> OptimizationSolutio
             detail="Can not get the optimization solution.\nDid you configure automatic optimization?",
         )
     return solution
+
+
+@app.post("/v1/energy-management/run", tags=["energy-management"])
+async def fastapi_energy_management_run_post(
+    mode: Optional[EnergyManagementMode] = EnergyManagementMode.OPTIMIZATION,
+    force_update: Optional[bool] = False,
+    force_enable: Optional[bool] = False,
+    wait_for_completion: Optional[bool] = False,
+) -> Response:
+    """Trigger an immediate energy management run using current configuration.
+
+    This endpoint uses the same internal run path as the scheduled automatic run.
+    No low-level optimization parameter payload is required.
+
+    Args:
+        mode: Run mode (OPTIMIZATION or PREDICTION). Defaults to OPTIMIZATION.
+        force_update: Refresh prediction data even if cache is valid.
+        force_enable: Include disabled providers while updating predictions.
+        wait_for_completion: If True, block until run is done and return HTTP 200.
+            If False (default), start run asynchronously and return HTTP 202 immediately.
+    """
+    ems = get_ems()
+
+    async def run_and_log() -> None:
+        try:
+            await ems.run(
+                mode=mode,
+                force_update=force_update,
+                force_enable=force_enable,
+            )
+        except Exception:
+            logger.exception("Background energy management run failed.")
+
+    if not wait_for_completion:
+        if ems.stage() != EnergyManagementStage.IDLE:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "busy",
+                    "message": "Energy management run already in progress.",
+                    "stage": str(ems.stage()),
+                },
+            )
+
+        asyncio.create_task(run_and_log())
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "accepted",
+                "message": "Energy management run started in background.",
+                "mode": str(mode),
+            },
+        )
+
+    try:
+        await ems.run(
+            mode=mode,
+            force_update=force_update,
+            force_enable=force_enable,
+        )
+    except Exception as e:
+        trace = "".join(traceback.TracebackException.from_exception(e).format())
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error on energy management run: {e}\n{trace}",
+        )
+
+    return Response()
 
 
 @app.get("/v1/energy-management/plan", tags=["energy-management"])

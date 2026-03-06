@@ -50,7 +50,7 @@ async def ems_manage_energy() -> None:
     This task should be executed by the server regularly
     to ensure proper energy management.
     """
-    await EnergyManagement().run()
+    await EnergyManagement().run(respect_interval=True)
 
 
 class EnergyManagement(
@@ -225,6 +225,8 @@ class EnergyManagement(
         if mode is None or mode == "PREDICTION":
             # Update the predictions
             cls.prediction.update_data(force_enable=force_enable, force_update=force_update)
+            # Remember energy run datetime.
+            EnergyManagement._last_run_datetime = to_datetime()
             logger.info("Energy management run done (predictions updated)")
             cls._stage = EnergyManagementStage.IDLE
             return
@@ -310,6 +312,7 @@ class EnergyManagement(
         genetic_seed: Optional[int] = None,
         force_enable: Optional[bool] = False,
         force_update: Optional[bool] = False,
+        respect_interval: Optional[bool] = False,
     ) -> None:
         """Run the energy management.
 
@@ -339,11 +342,27 @@ class EnergyManagement(
                 prediction providers.
             force_update (bool, optional): If True, forces data to be refreshed
                 even if a cached version is still valid.
+            respect_interval (bool, optional): If True, skip this run when the
+                configured EMS interval has not elapsed since the last completed run.
+                Intended for scheduled/background runs.
 
         Returns:
             None
         """
         async with self._run_lock:
+            if respect_interval:
+                last_run_datetime = EnergyManagement._last_run_datetime
+                interval_sec = float(self.config.ems.interval)
+                if last_run_datetime is not None:
+                    elapsed_sec = (to_datetime() - last_run_datetime).total_seconds()
+                    if elapsed_sec < interval_sec:
+                        logger.debug(
+                            "Skipping scheduled energy management run: elapsed={}s, interval={}s.",
+                            int(elapsed_sec),
+                            int(interval_sec),
+                        )
+                        return
+
             loop = get_running_loop()
             # Create a partial function with parameters "baked in"
             func = partial(
