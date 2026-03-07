@@ -627,6 +627,17 @@ class GeneticOptimization(OptimizationBase):
         """Set up the DEAP environment with fitness and individual creation rules."""
         self.opti_param = opti_param
 
+        # Recompute fixed_eauto_hours relative to start_hour so the EV can charge
+        # throughout the full horizon regardless of when the optimisation starts.
+        # Example: start_hour=22, horizon=24, prediction=48
+        #   old (start-hour-agnostic): fixed = 48-24 = 24 → only hours 22-23 usable (BUG)
+        #   new:                       fixed = max(0, 48-(22+24)) = 2 → hours 22-45 usable
+        self.fixed_eauto_hours = max(
+            0,
+            self.config.prediction.hours
+            - (start_hour + (self.config.optimization.horizon_hours or 24)),
+        )
+
         # Remove existing definitions if any
         for attr in ["FitnessMin", "Individual"]:
             if attr in creator.__dict__:
@@ -870,6 +881,22 @@ class GeneticOptimization(OptimizationBase):
             restwert_akku = battery_energy_content * parameters.ems.preis_euro_pro_wh_akku
             gesamtbilanz += -restwert_akku
 
+        # EV residual value — symmetric to the battery residual value above.
+        # Credits the energy remaining in the EV at end of the horizon so the optimizer
+        # treats EV charging identically to battery charging: prefer the cheapest available
+        # hours (solar first, cheap grid next, expensive grid last).
+        ev_lcos_wh = getattr(parameters.ems, "preis_euro_pro_wh_ev", 0.0)
+        if self.simulation.ev is not None and ev_lcos_wh > 0:
+            try:
+                ev_capacity_wh = self.simulation.ev.parameters.capacity_wh
+                ev_energy_wh = (
+                    self.simulation.ev.current_soc_percentage() / 100.0 * ev_capacity_wh
+                )
+                restwert_ev = ev_energy_wh * ev_lcos_wh
+                gesamtbilanz += -restwert_ev
+            except AttributeError:
+                pass
+
         # --- AC charging break-even penalty ---
         # Penalise AC charging decisions that cannot be economically justified given the
         # round-trip losses (AC→DC charge conversion, battery internal, DC→AC discharge
@@ -1041,6 +1068,57 @@ class GeneticOptimization(OptimizationBase):
                     abs(parameters.eauto.min_soc_percentage - ev_soc_percentage) * penalty
                 )
 
+        # --- EV target SOC by deadline penalty ---
+        # Penalise solutions that fail to reach target_soc_percentage by target_soc_time.
+        # Two components:
+        #   ev_soc_target_miss  – per % below target at the deadline hour
+        #   ev_soc_late_per_hour – flat penalty per hour the target stays unmet after deadline
+        if (
+            self.optimize_ev
+            and parameters.eauto
+            and self.simulation.ev
+            and parameters.eauto.target_soc_percentage is not None
+            and parameters.eauto.target_soc_time is not None
+        ):
+            try:
+                target_miss_penalty = float(
+                    self.config.optimization.genetic.penalties["ev_soc_target_miss"]
+                )
+            except Exception:
+                target_miss_penalty = 10.0
+            try:
+                late_penalty = float(
+                    self.config.optimization.genetic.penalties["ev_soc_late_per_hour"]
+                )
+            except Exception:
+                late_penalty = 2.0
+
+            target_soc = parameters.eauto.target_soc_percentage
+            target_hour_of_day = int(parameters.eauto.target_soc_time.split(":")[0])
+
+            # Compute deadline index relative to start_hour, with next-day wrap-around
+            if start_hour <= target_hour_of_day:
+                deadline_index = target_hour_of_day - start_hour
+            else:
+                deadline_index = (24 - start_hour) + target_hour_of_day
+
+            eauto_soc_arr = np.array(
+                simulation_result.get("EAuto_SoC_pro_Stunde", []), dtype=float
+            )
+            horizon = self.config.optimization.horizon_hours or 24
+
+            if len(eauto_soc_arr) > 0 and deadline_index < len(eauto_soc_arr):
+                soc_at_deadline = float(eauto_soc_arr[deadline_index])
+                if not np.isnan(soc_at_deadline) and soc_at_deadline < target_soc:
+                    gesamtbilanz += (target_soc - soc_at_deadline) * target_miss_penalty
+
+                    # Count hours after deadline (within horizon) where target still unmet
+                    end_idx = min(horizon, len(eauto_soc_arr))
+                    for idx in range(deadline_index + 1, end_idx):
+                        soc = float(eauto_soc_arr[idx])
+                        if not np.isnan(soc) and soc < target_soc:
+                            gesamtbilanz += late_penalty
+
         return (gesamtbilanz,)
 
     def optimize(
@@ -1156,6 +1234,11 @@ class GeneticOptimization(OptimizationBase):
             eauto.set_charge_per_hour(np.full(self.config.prediction.hours, 1))
             self.optimize_ev = (
                 parameters.eauto.min_soc_percentage - parameters.eauto.initial_soc_percentage >= 0
+                or (
+                    parameters.eauto.target_soc_percentage is not None
+                    and parameters.eauto.target_soc_percentage
+                    > parameters.eauto.initial_soc_percentage
+                )
             )
             # electrical vehicle charge rates
             if parameters.eauto.charge_rates is not None:

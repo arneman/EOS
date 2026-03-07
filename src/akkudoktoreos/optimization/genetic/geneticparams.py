@@ -57,6 +57,12 @@ class GeneticEnergyManagementParameters(GeneticParametersBaseModel):
             "description": "A float representing the cost of battery energy per watt-hour."
         }
     )
+    preis_euro_pro_wh_ev: float = Field(
+        default=0.0,
+        json_schema_extra={
+            "description": "Residual value of EV energy per watt-hour (levelized cost of storage). Credits energy remaining in the EV at end of the optimisation horizon, making the optimizer prefer cheap charging windows (solar first) — symmetric to preis_euro_pro_wh_akku for the stationary battery."
+        }
+    )
     gesamtlast: list[float] = Field(
         json_schema_extra={
             "description": "An array of floats representing the total load (consumption) in watts for different time intervals."
@@ -236,6 +242,10 @@ class GeneticOptimizationParameters(
         if "dc_charge_feed_in_opportunity" not in cls.config.optimization.genetic.penalties:
             # Default 0.0 keeps legacy behavior unless explicitly enabled by configuration.
             cls.config.optimization.genetic.penalties["dc_charge_feed_in_opportunity"] = 0.0
+        if "ev_soc_target_miss" not in cls.config.optimization.genetic.penalties:
+            cls.config.optimization.genetic.penalties["ev_soc_target_miss"] = 10.0
+        if "ev_soc_late_per_hour" not in cls.config.optimization.genetic.penalties:
+            cls.config.optimization.genetic.penalties["ev_soc_late_per_hour"] = 2.0
 
         # Get start solution from last run
         start_solution = None
@@ -646,6 +656,12 @@ class GeneticOptimizationParameters(
                         einspeiseverguetung_euro_pro_wh=feed_in_tariff_wh,
                         gesamtlast=loadforecast_power_w,
                         preis_euro_pro_wh_akku=battery_lcos_kwh / 1000,
+                        preis_euro_pro_wh_ev=(
+                            electric_vehicle_config.levelized_cost_of_storage_kwh / 1000
+                            if electric_vehicle_params is not None
+                            and electric_vehicle_config.levelized_cost_of_storage_kwh is not None
+                            else 0.0
+                        ),
                     ),
                     temperature_forecast=weather_temp_air,
                     pv_akku=battery_params,
