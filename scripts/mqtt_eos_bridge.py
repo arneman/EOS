@@ -29,6 +29,7 @@ Usage:
     python scripts/mqtt_eos_bridge.py
 """
 
+import json
 import os
 import sys
 import threading
@@ -63,7 +64,19 @@ EOS_HEALTH_PATH = "/docs"
 EOS_PUT_TIMEOUT_S = 5
 EOS_HEALTH_TIMEOUT_S = 5
 EOS_SEND_INTERVAL_S = 60
+EOS_POLL_INTERVAL_S = 60  # How often to poll EOS solution
 MQTT_KEEPALIVE_S = 60
+
+# MQTT Publish topics (EOS → MQTT)
+MQTT_PUB_PREFIX = "eos"
+MQTT_PUB_BATTERY_MODE = f"{MQTT_PUB_PREFIX}/battery/operation_mode"
+MQTT_PUB_BATTERY_FACTOR = f"{MQTT_PUB_PREFIX}/battery/operation_mode_factor"
+MQTT_PUB_BATTERY_CHARGE = f"{MQTT_PUB_PREFIX}/battery/charge_allowed"
+MQTT_PUB_BATTERY_DISCHARGE = f"{MQTT_PUB_PREFIX}/battery/discharge_allowed"
+MQTT_PUB_BATTERY_POWER = f"{MQTT_PUB_PREFIX}/battery/charge_power_w"
+MQTT_PUB_EV_CHARGE = f"{MQTT_PUB_PREFIX}/ev/charge_allowed"
+MQTT_PUB_EV_POWER = f"{MQTT_PUB_PREFIX}/ev/charge_power_w"
+MQTT_PUB_SCHEDULE = f"{MQTT_PUB_PREFIX}/schedule"
 
 # MQTT Topics
 TOPIC_BMW_SOC = "devices/bmw_i5/cardata/drivetrain/batteryManagement/header"
@@ -141,9 +154,11 @@ battery_soc_factor: Optional[float] = None  # Last known real battery SOC (0.0-1
 eos_current_capacity_wh: float = REAL_BATTERY_CAPACITY_WH  # Currently configured in EOS
 eos_current_max_charge_w: float = REAL_BATTERY_MAX_CHARGE_W  # Currently configured in EOS
 
-# Flag to control background repeat thread
+# Flag to control background threads
 repeat_thread_running = False
 repeat_thread: Optional[threading.Thread] = None
+solution_thread: Optional[threading.Thread] = None
+mqtt_client: Optional[mqtt.Client] = None  # Set in main() for publishing
 
 
 # =============================================================================
@@ -366,6 +381,136 @@ def send_virtual_soc():
 
 
 # =============================================================================
+# EOS Solution → MQTT Publishing
+# =============================================================================
+
+# Battery operation modes that indicate charging is happening
+CHARGING_MODES = {"NON_EXPORT", "GRID_SUPPORT_IMPORT", "FORCED_CHARGE", "SELF_CONSUMPTION"}
+DISCHARGING_MODES = {"PEAK_SHAVING", "GRID_SUPPORT_EXPORT", "FORCED_DISCHARGE"}
+
+# All known operation modes (prefix stripped from column names)
+OPERATION_MODES = [
+    "idle", "non_export", "grid_support_import", "grid_support_export",
+    "peak_shaving", "self_consumption", "forced_charge", "forced_discharge",
+    "fault", "frequency_regulation", "outage_supply", "ramp_rate_control",
+    "reserve_backup",
+]
+
+
+def get_active_mode(row: dict, prefix: str = "battery1") -> tuple[str, float]:
+    """Extract active operation mode and factor from a solution row.
+
+    Returns (mode_name_upper, factor) for the first mode with op_mode == 1.0.
+    Falls back to ("IDLE", 1.0) if nothing active.
+    """
+    for mode in OPERATION_MODES:
+        mode_key = f"{prefix}_{mode}_op_mode"
+        if row.get(mode_key, 0.0) == 1.0:
+            factor_key = f"{prefix}_{mode}_op_factor"
+            factor = row.get(factor_key, 1.0)
+            return mode.upper(), factor
+    return "IDLE", 1.0
+
+
+def poll_eos_solution():
+    """Background thread: poll EOS solution and publish current state to MQTT."""
+    logger.info(f"Starting EOS solution poller (every {EOS_POLL_INTERVAL_S}s)...")
+    last_mode = None
+    last_factor = None
+
+    while repeat_thread_running:
+        try:
+            time.sleep(EOS_POLL_INTERVAL_S)
+            if not repeat_thread_running:
+                break
+            if mqtt_client is None or not mqtt_client.is_connected():
+                continue
+
+            # Fetch solution from EOS
+            try:
+                resp = requests.get(
+                    f"{EOS_URL}/v1/energy-management/optimization/solution",
+                    timeout=EOS_PUT_TIMEOUT_S,
+                )
+                resp.raise_for_status()
+                solution_data = resp.json()
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"✗ Failed to poll EOS solution: {e}")
+                continue
+
+            sol = solution_data.get("solution", {}).get("data", {})
+            if not sol:
+                continue
+
+            # Find current hour's row (closest timestamp <= now)
+            now_str = datetime.now().astimezone().isoformat(timespec="seconds")
+            sorted_timestamps = sorted(sol.keys())
+
+            current_ts = None
+            for ts in sorted_timestamps:
+                if ts <= now_str:
+                    current_ts = ts
+                else:
+                    break
+
+            if current_ts is None:
+                current_ts = sorted_timestamps[0]
+
+            row = sol[current_ts]
+
+            # Extract battery operation mode
+            mode, factor = get_active_mode(row, "battery1")
+            charge_allowed = 1 if mode in CHARGING_MODES else 0
+            discharge_allowed = 1 if mode in DISCHARGING_MODES else 0
+
+            # Calculate charge power for real battery and EV
+            if mode in CHARGING_MODES:
+                battery_power_w = int(factor * REAL_BATTERY_MAX_CHARGE_W)
+                ev_power_w = int(factor * ev_max_charge_w) if ev_plugged and ev_deficit_wh > 0 else 0
+            else:
+                battery_power_w = 0
+                ev_power_w = 0
+
+            # Publish current state (retained)
+            mqtt_client.publish(MQTT_PUB_BATTERY_MODE, mode, retain=True)
+            mqtt_client.publish(MQTT_PUB_BATTERY_FACTOR, f"{factor:.2f}", retain=True)
+            mqtt_client.publish(MQTT_PUB_BATTERY_CHARGE, str(charge_allowed), retain=True)
+            mqtt_client.publish(MQTT_PUB_BATTERY_DISCHARGE, str(discharge_allowed), retain=True)
+            mqtt_client.publish(MQTT_PUB_BATTERY_POWER, str(battery_power_w), retain=True)
+            mqtt_client.publish(MQTT_PUB_EV_CHARGE, str(charge_allowed), retain=True)
+            mqtt_client.publish(MQTT_PUB_EV_POWER, str(ev_power_w), retain=True)
+
+            # Build schedule (all hours from now onward)
+            schedule = []
+            for ts in sorted_timestamps:
+                if ts < current_ts:
+                    continue
+                r = sol[ts]
+                m, f = get_active_mode(r, "battery1")
+                schedule.append({
+                    "time": ts,
+                    "mode": m,
+                    "factor": round(f, 2),
+                    "charge": 1 if m in CHARGING_MODES else 0,
+                    "soc": round(r.get("battery1_soc_factor", 0.0), 3),
+                })
+            mqtt_client.publish(MQTT_PUB_SCHEDULE, json.dumps(schedule), retain=True)
+
+            # Log on change
+            if mode != last_mode or factor != last_factor:
+                logger.info(
+                    f"(eos→mqtt) Battery: {mode} @ {factor:.0%} | "
+                    f"charge={charge_allowed} discharge={discharge_allowed} | "
+                    f"bat={battery_power_w}W ev={ev_power_w}W"
+                )
+                last_mode = mode
+                last_factor = factor
+
+        except Exception as e:
+            logger.error(f"Error in solution poller: {e}")
+
+
+# =============================================================================
 # MQTT Callbacks
 # =============================================================================
 
@@ -509,10 +654,15 @@ def main():
         sys.exit(1)
 
     # Start background repeat thread
-    global repeat_thread_running, repeat_thread
+    global repeat_thread_running, repeat_thread, solution_thread, mqtt_client
+    mqtt_client = client
     repeat_thread_running = True
     repeat_thread = threading.Thread(target=repeat_all_values, daemon=True)
     repeat_thread.start()
+
+    # Start EOS solution polling thread
+    solution_thread = threading.Thread(target=poll_eos_solution, daemon=True)
+    solution_thread.start()
     
     # Start MQTT loop
     logger.info("Starting MQTT loop... (Press Ctrl+C to exit)")
@@ -524,6 +674,8 @@ def main():
         client.disconnect()
         if repeat_thread:
             repeat_thread.join(timeout=2)
+        if solution_thread:
+            solution_thread.join(timeout=2)
         logger.success("Bridge stopped.")
 
 
