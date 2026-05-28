@@ -4,4 +4,4 @@ ABSDIR=$(dirname $ABSPATH)
 
 cd $ABSDIR
 export MQTT_PASSWORD=$(cat .mqtt_password)
-uv run python scripts/mqtt_eos_bridge.py
+/root/.local/bin/uv run python scripts/mqtt_eos_bridge.py
