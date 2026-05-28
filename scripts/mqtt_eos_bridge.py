@@ -7,7 +7,14 @@ Connects to MQTT broker and forwards device measurements to EOS REST API.
 
 MQTT Topics:
 - devices/bmw_i5/cardata/drivetrain/batteryManagement/header → BMW_i5-soc-factor
-- devices/victron_battery/battery_soc → LiFePO4_Cluster-soc-factor
+- devices/victron_battery/battery_soc → LiFePO4_Cluster-soc-factor (combined virtual SOC)
+- devices/bmw_i5//battery_missing_until_max_soc_wh → virtual battery capacity update
+
+Virtual Battery Strategy:
+  EOS battery capacity is inflated by the EV's energy deficit so that EOS
+  plans enough PV charging for both battery and EV. The reported SOC is
+  battery_stored_wh / (battery_capacity + ev_deficit_wh). This makes EOS
+  plan more charging hours without any code changes to EOS itself.
 
 Configuration via environment variables:
 - MQTT_BROKER (default: mqtt.fritz.box)
@@ -50,6 +57,7 @@ DEFAULT_EOS_URL = "http://localhost:8503"
 DEFAULT_LOG_LEVEL = "INFO"
 
 EOS_MEASUREMENT_PATH = "/v1/measurement/value"
+EOS_CONFIG_PATH = "/v1/config/devices/batteries/0"
 EOS_HEALTH_PATH = "/docs"
 
 EOS_PUT_TIMEOUT_S = 5
@@ -57,14 +65,24 @@ EOS_HEALTH_TIMEOUT_S = 5
 EOS_SEND_INTERVAL_S = 60
 MQTT_KEEPALIVE_S = 60
 
+# MQTT Topics
 TOPIC_BMW_SOC = "devices/bmw_i5/cardata/drivetrain/batteryManagement/header"
 TOPIC_BATTERY_SOC = "devices/victron_battery/battery_soc"
+TOPIC_EV_DEFICIT = "devices/bmw_i5//battery_missing_until_max_soc_wh"
+TOPIC_EV_PLUGGED = "devices/bmw_i5//is_plugged"
 
+# EOS measurement keys
 BMW_SOC_EOS_KEY = "BMW_i5-soc-factor"
 BATTERY_SOC_EOS_KEY = "LiFePO4_Cluster-soc-factor"
 
+# Descriptions
 BMW_SOC_DESCRIPTION = "BMW i5 State of Charge"
 BATTERY_SOC_DESCRIPTION = "Battery State of Charge"
+
+# Real battery hardware constants
+REAL_BATTERY_CAPACITY_WH = 30412
+REAL_BATTERY_MAX_CHARGE_W = 8000
+EV_MAX_CHARGE_W = 11000
 
 SOC_SCALE_FACTOR = 100.0
 
@@ -104,7 +122,7 @@ TOPIC_MAPPING = {
     },
 }
 
-MQTT_TOPICS = sorted(TOPIC_MAPPING.keys())
+MQTT_TOPICS = sorted(set(TOPIC_MAPPING.keys()) | {TOPIC_EV_DEFICIT, TOPIC_EV_PLUGGED})
 
 # =============================================================================
 # Global State
@@ -113,6 +131,13 @@ MQTT_TOPICS = sorted(TOPIC_MAPPING.keys())
 # Track last sent values and timestamps for change detection (60 sec max)
 eos_last_values: Dict[str, Optional[float]] = {}  # key -> last sent value
 eos_last_timestamps: Dict[str, float] = {}  # key -> last send timestamp
+
+# Virtual battery state
+ev_deficit_wh: float = 0.0  # Energy EV needs to reach max SOC [Wh]
+ev_plugged: bool = False  # Whether EV is currently plugged in
+battery_soc_factor: Optional[float] = None  # Last known real battery SOC (0.0-1.0)
+eos_current_capacity_wh: float = REAL_BATTERY_CAPACITY_WH  # Currently configured in EOS
+eos_current_max_charge_w: float = REAL_BATTERY_MAX_CHARGE_W  # Currently configured in EOS
 
 # Flag to control background repeat thread
 repeat_thread_running = False
@@ -215,24 +240,127 @@ def repeat_all_values():
             
             logger.debug("(60s timer) Resending all cached values...")
             
-            # Resend all cached SOC values
-            for topic, config in TOPIC_MAPPING.items():
-                key = config["eos_key"]
-                if key in eos_last_values and eos_last_values[key] is not None:
-                    value = eos_last_values[key]
-                    # For SOC values, format as percentage
-                    value_formatted = f"{value:.1%}"
+            # Resend BMW SOC
+            bmw_key = TOPIC_MAPPING[TOPIC_BMW_SOC]["eos_key"]
+            if bmw_key in eos_last_values and eos_last_values[bmw_key] is not None:
+                value = eos_last_values[bmw_key]
+                send_measurement_to_eos(
+                    bmw_key,
+                    value,
+                    TOPIC_MAPPING[TOPIC_BMW_SOC]["description"],
+                    force=True,
+                    source="repeat",
+                    value_formatted=f"{value:.1%}",
+                )
+
+            # Resend virtual battery SOC (combined)
+            if battery_soc_factor is not None:
+                virtual_soc = get_virtual_soc_factor()
+                if virtual_soc is not None:
                     send_measurement_to_eos(
-                        key,
-                        value,
-                        config["description"],
+                        BATTERY_SOC_EOS_KEY,
+                        virtual_soc,
+                        f"Virtual Battery SOC (real={battery_soc_factor:.1%}, deficit={int(ev_deficit_wh)}Wh)",
                         force=True,
                         source="repeat",
-                        value_formatted=value_formatted,
+                        value_formatted=f"{virtual_soc:.1%}",
                     )
             
         except Exception as e:
             logger.error(f"Error in repeat thread: {e}")
+
+
+# =============================================================================
+# Virtual Battery Logic
+# =============================================================================
+
+
+def get_virtual_capacity_wh() -> float:
+    """Calculate virtual battery capacity = real battery + EV deficit."""
+    return REAL_BATTERY_CAPACITY_WH + ev_deficit_wh
+
+
+def get_virtual_soc_factor() -> Optional[float]:
+    """Calculate combined virtual SOC = battery_stored / virtual_capacity."""
+    if battery_soc_factor is None:
+        return None
+    battery_stored_wh = battery_soc_factor * REAL_BATTERY_CAPACITY_WH
+    virtual_capacity = get_virtual_capacity_wh()
+    return battery_stored_wh / virtual_capacity
+
+
+def get_virtual_max_charge_w() -> float:
+    """Max charge power: battery + EV if EV has deficit AND is plugged in."""
+    if ev_deficit_wh > 0 and ev_plugged:
+        return REAL_BATTERY_MAX_CHARGE_W + EV_MAX_CHARGE_W
+    return REAL_BATTERY_MAX_CHARGE_W
+
+
+def update_eos_battery_config() -> bool:
+    """Update EOS battery config with virtual capacity and charge power.
+
+    Only sends updates if values actually changed.
+    Returns True if successful (or no update needed), False on error.
+    """
+    global eos_current_capacity_wh, eos_current_max_charge_w
+
+    new_capacity = int(get_virtual_capacity_wh())
+    new_max_charge = int(get_virtual_max_charge_w())
+
+    capacity_changed = abs(new_capacity - eos_current_capacity_wh) > 100  # >100 Wh threshold
+    charge_changed = abs(new_max_charge - eos_current_max_charge_w) > 100
+
+    if not capacity_changed and not charge_changed:
+        return True
+
+    config_endpoint = f"{EOS_URL}{EOS_CONFIG_PATH}"
+    success = True
+
+    if capacity_changed:
+        try:
+            resp = requests.put(
+                f"{config_endpoint}/capacity_wh",
+                json=new_capacity,
+                timeout=EOS_PUT_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            eos_current_capacity_wh = new_capacity
+            logger.info(f"✓ EOS capacity updated: {new_capacity} Wh (EV deficit: {int(ev_deficit_wh)} Wh)")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"✗ Failed to update EOS capacity: {e}")
+            success = False
+
+    if charge_changed:
+        try:
+            resp = requests.put(
+                f"{config_endpoint}/max_charge_power_w",
+                json=new_max_charge,
+                timeout=EOS_PUT_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            eos_current_max_charge_w = new_max_charge
+            logger.info(f"✓ EOS max charge power updated: {new_max_charge} W")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"✗ Failed to update EOS max charge power: {e}")
+            success = False
+
+    return success
+
+
+def send_virtual_soc():
+    """Calculate and send virtual combined SOC to EOS."""
+    virtual_soc = get_virtual_soc_factor()
+    if virtual_soc is None:
+        return
+
+    value_formatted = f"{virtual_soc:.1%}"
+    send_measurement_to_eos(
+        BATTERY_SOC_EOS_KEY,
+        virtual_soc,
+        f"Virtual Battery SOC (real={battery_soc_factor:.1%}, deficit={int(ev_deficit_wh)}Wh)",
+        source="virtual",
+        value_formatted=value_formatted,
+    )
 
 
 # =============================================================================
@@ -262,19 +390,45 @@ def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=No
 
 def on_message(client, userdata, msg):
     """Callback when MQTT message is received."""
+    global ev_deficit_wh, battery_soc_factor, ev_plugged
+
     topic = msg.topic
     payload = msg.payload.decode("utf-8")
 
     logger.trace(f"MQTT: {topic} = {payload}")
 
     try:
-        # Handle direct mapped topics (SOC values)
-        if topic in TOPIC_MAPPING:
+        # Handle EV energy deficit → update virtual battery config
+        if topic == TOPIC_EV_DEFICIT:
+            new_deficit = max(0.0, float(payload))
+            if abs(new_deficit - ev_deficit_wh) > 100:  # >100 Wh change threshold
+                ev_deficit_wh = new_deficit
+                logger.info(f"(mqtt) ✓ EV deficit: {int(ev_deficit_wh)} Wh")
+                update_eos_battery_config()
+                send_virtual_soc()
+
+        # Handle EV plugged state → update max charge power
+        elif topic == TOPIC_EV_PLUGGED:
+            new_plugged = int(float(payload)) == 1
+            if new_plugged != ev_plugged:
+                ev_plugged = new_plugged
+                logger.info(f"(mqtt) ✓ EV plugged: {ev_plugged}")
+                update_eos_battery_config()
+
+        # Handle battery SOC → store real value and send virtual SOC
+        elif topic == TOPIC_BATTERY_SOC:
+            config = TOPIC_MAPPING[topic]
+            raw_value = float(payload)
+            battery_soc_factor = config["converter"](raw_value)
+            # Send virtual combined SOC (not raw battery SOC)
+            send_virtual_soc()
+
+        # Handle other direct mapped topics (BMW SOC)
+        elif topic in TOPIC_MAPPING:
             config = TOPIC_MAPPING[topic]
             raw_value = float(payload)
             converted_value = config["converter"](raw_value)
-            
-            # Format SOC value as percentage
+
             value_formatted = f"{converted_value:.1%}"
             send_measurement_to_eos(
                 config["eos_key"],
