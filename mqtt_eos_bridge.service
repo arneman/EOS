@@ -1,0 +1,14 @@
+[Unit]
+Description=MQTT EOS Bridge (virtual battery + solution publisher)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/root/eos/mqtt_eos_bridge.sh
+WorkingDirectory=/root/eos
+TimeoutSec=0
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
