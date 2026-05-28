@@ -68,8 +68,9 @@ MQTT_KEEPALIVE_S = 60
 # MQTT Topics
 TOPIC_BMW_SOC = "devices/bmw_i5/cardata/drivetrain/batteryManagement/header"
 TOPIC_BATTERY_SOC = "devices/victron_battery/battery_soc"
-TOPIC_EV_DEFICIT = "devices/bmw_i5//battery_missing_until_max_soc_wh"
-TOPIC_EV_PLUGGED = "devices/bmw_i5//is_plugged"
+TOPIC_EV_DEFICIT = "devices/bmw_i5/battery_missing_until_max_soc_wh"
+TOPIC_EV_PLUGGED = "devices/bmw_i5/is_plugged"
+TOPIC_EV_MAX_POWER = "devices/bmw_i5/max_power"
 
 # EOS measurement keys
 BMW_SOC_EOS_KEY = "BMW_i5-soc-factor"
@@ -82,7 +83,7 @@ BATTERY_SOC_DESCRIPTION = "Battery State of Charge"
 # Real battery hardware constants
 REAL_BATTERY_CAPACITY_WH = 30412
 REAL_BATTERY_MAX_CHARGE_W = 8000
-EV_MAX_CHARGE_W = 11000
+EV_MAX_CHARGE_W_DEFAULT = 11000  # Used until MQTT publishes actual value
 
 SOC_SCALE_FACTOR = 100.0
 
@@ -122,7 +123,7 @@ TOPIC_MAPPING = {
     },
 }
 
-MQTT_TOPICS = sorted(set(TOPIC_MAPPING.keys()) | {TOPIC_EV_DEFICIT, TOPIC_EV_PLUGGED})
+MQTT_TOPICS = sorted(set(TOPIC_MAPPING.keys()) | {TOPIC_EV_DEFICIT, TOPIC_EV_PLUGGED, TOPIC_EV_MAX_POWER})
 
 # =============================================================================
 # Global State
@@ -135,6 +136,7 @@ eos_last_timestamps: Dict[str, float] = {}  # key -> last send timestamp
 # Virtual battery state
 ev_deficit_wh: float = 0.0  # Energy EV needs to reach max SOC [Wh]
 ev_plugged: bool = False  # Whether EV is currently plugged in
+ev_max_charge_w: float = EV_MAX_CHARGE_W_DEFAULT  # EV max charge power from MQTT [W]
 battery_soc_factor: Optional[float] = None  # Last known real battery SOC (0.0-1.0)
 eos_current_capacity_wh: float = REAL_BATTERY_CAPACITY_WH  # Currently configured in EOS
 eos_current_max_charge_w: float = REAL_BATTERY_MAX_CHARGE_W  # Currently configured in EOS
@@ -292,7 +294,7 @@ def get_virtual_soc_factor() -> Optional[float]:
 def get_virtual_max_charge_w() -> float:
     """Max charge power: battery + EV if EV has deficit AND is plugged in."""
     if ev_deficit_wh > 0 and ev_plugged:
-        return REAL_BATTERY_MAX_CHARGE_W + EV_MAX_CHARGE_W
+        return REAL_BATTERY_MAX_CHARGE_W + ev_max_charge_w
     return REAL_BATTERY_MAX_CHARGE_W
 
 
@@ -390,7 +392,7 @@ def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=No
 
 def on_message(client, userdata, msg):
     """Callback when MQTT message is received."""
-    global ev_deficit_wh, battery_soc_factor, ev_plugged
+    global ev_deficit_wh, battery_soc_factor, ev_plugged, ev_max_charge_w
 
     topic = msg.topic
     payload = msg.payload.decode("utf-8")
@@ -413,6 +415,14 @@ def on_message(client, userdata, msg):
             if new_plugged != ev_plugged:
                 ev_plugged = new_plugged
                 logger.info(f"(mqtt) ✓ EV plugged: {ev_plugged}")
+                update_eos_battery_config()
+
+        # Handle EV max charge power
+        elif topic == TOPIC_EV_MAX_POWER:
+            new_max_w = max(0.0, float(payload))
+            if abs(new_max_w - ev_max_charge_w) > 100:
+                ev_max_charge_w = new_max_w
+                logger.info(f"(mqtt) ✓ EV max charge power: {int(ev_max_charge_w)} W")
                 update_eos_battery_config()
 
         # Handle battery SOC → store real value and send virtual SOC
