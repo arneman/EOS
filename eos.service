@@ -4,6 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
+Environment=EOS_DIR=/root/EOS
 ExecStart=/root/EOS/eos.sh
 WorkingDirectory=/root/EOS
 TimeoutSec=0
