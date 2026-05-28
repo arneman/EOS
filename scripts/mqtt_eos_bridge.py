@@ -321,10 +321,10 @@ def on_connect(client, userdata, flags, rc, properties=None):
         logger.error(f"✗ MQTT connection failed with code {rc}")
 
 
-def on_disconnect(client, userdata, rc, properties=None):
+def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
     """Callback when MQTT connection is lost."""
-    if rc != 0:
-        logger.warning(f"Unexpected MQTT disconnect (code {rc}). Reconnecting...")
+    if reason_code != 0:
+        logger.warning(f"Unexpected MQTT disconnect (code {reason_code}). Reconnecting...")
 
 
 def on_message(client, userdata, msg):
