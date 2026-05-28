@@ -885,15 +885,44 @@ class GeneticOptimization(OptimizationBase):
         # Credits the energy remaining in the EV at end of the horizon so the optimizer
         # treats EV charging identically to battery charging: prefer the cheapest available
         # hours (solar first, cheap grid next, expensive grid last).
+        #
+        # Cap + mirror penalty at target_soc_percentage:
+        #   Below target_soc  → credit (positive incentive to charge UP to the target)
+        #   Above target_soc  → penalty (negative incentive to charge BEYOND the target)
+        # The result is a clear fitness maximum exactly at target_soc, preventing both
+        # under-charging (no credit) and over-charging (mirror penalty).
+        # When no target_soc_percentage is set, the full SoC earns credit unconditionally.
         ev_lcos_wh = getattr(parameters.ems, "preis_euro_pro_wh_ev", 0.0)
         if self.simulation.ev is not None and ev_lcos_wh > 0:
             try:
                 ev_capacity_wh = self.simulation.ev.parameters.capacity_wh
-                ev_energy_wh = (
-                    self.simulation.ev.current_soc_percentage() / 100.0 * ev_capacity_wh
-                )
-                restwert_ev = ev_energy_wh * ev_lcos_wh
-                gesamtbilanz += -restwert_ev
+                current_ev_soc = self.simulation.ev.current_soc_percentage()
+                if (
+                    parameters.eauto is not None
+                    and parameters.eauto.target_soc_percentage is not None
+                ):
+                    target_soc_pct = float(parameters.eauto.target_soc_percentage)
+                    if current_ev_soc <= target_soc_pct:
+                        # Normal credit for energy up to target
+                        ev_energy_wh = current_ev_soc / 100.0 * ev_capacity_wh
+                    else:
+                        # Credit capped at target + mirror penalty for the overshoot
+                        overshoot_pct = current_ev_soc - target_soc_pct
+                        credit_wh = target_soc_pct / 100.0 * ev_capacity_wh
+                        penalty_wh = overshoot_pct / 100.0 * ev_capacity_wh
+                        # Net = credit - penalty; collapses to credit_at_target - 0 at
+                        # exactly target → same credit as stopping there, then falls
+                        # below for every % above target. Makes fitness peak at target.
+                        gesamtbilanz += -(credit_wh - penalty_wh) * ev_lcos_wh
+                        ev_energy_wh = None  # handled above
+                    if ev_energy_wh is not None:
+                        restwert_ev = ev_energy_wh * ev_lcos_wh
+                        gesamtbilanz += -restwert_ev
+                else:
+                    # No deadline target → credit the full stored energy
+                    ev_energy_wh = current_ev_soc / 100.0 * ev_capacity_wh
+                    restwert_ev = ev_energy_wh * ev_lcos_wh
+                    gesamtbilanz += -restwert_ev
             except AttributeError:
                 pass
 

@@ -540,3 +540,104 @@ def test_ev_residual_value_credited(config_eos):
     )
     # credit = 6000 Wh × 0.00022 €/Wh = 1.32 € → fitness = -1.32
     assert result[0] == pytest.approx(-1.32, rel=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# 12. EV residual value peaks at target_soc and penalises overshoot
+# ---------------------------------------------------------------------------
+
+def test_ev_residual_value_capped_at_target_soc(config_eos):
+    """preis_euro_pro_wh_ev applies a mirror penalty for SoC above target_soc.
+
+    The fitness function must peak exactly at target_soc_percentage:
+      - Below target: normal credit (incentive to charge UP to the target)
+      - Above target: credit - mirror penalty = less net credit (incentive to STOP at target)
+
+    Example (capacity=10kWh, LCOS=0.00022€/Wh, target=90%, actual_soc=100%):
+      credit_wh  = 9000 Wh (90%)
+      penalty_wh = 1000 Wh (overshoot 10%)
+      net contribution to gesamtbilanz = -(9000 - 1000) × 0.00022 = -1.76 €
+      vs. stopping at 90%: -(9000) × 0.00022 = -1.98 €  ← lower fitness score = better
+    """
+    from unittest.mock import MagicMock
+
+    prediction_hours = 8
+
+    config_eos.merge_settings_from_dict(
+        {
+            "optimization": {
+                "horizon_hours": prediction_hours,
+                "genetic": {
+                    "penalties": {
+                        "ev_soc_miss": 0,
+                        "ac_charge_break_even": 0,
+                        "dc_charge_feed_in_opportunity": 0,
+                        "ev_soc_target_miss": 0.0,
+                        "ev_soc_late_per_hour": 0.0,
+                    }
+                },
+            },
+            "prediction": {"hours": prediction_hours},
+        }
+    )
+
+    def _make_opt_ev(soc_percent):
+        opt = GeneticOptimization(fixed_seed=1)
+        opt.optimize_ev = False  # isolate residual value logic
+        ev_mock = MagicMock()
+        ev_mock.current_soc_percentage.return_value = float(soc_percent)
+        ev_mock.parameters = MagicMock()
+        ev_mock.parameters.capacity_wh = 10_000.0
+        opt.simulation = MagicMock()
+        opt.simulation.battery = None
+        opt.simulation.ev = ev_mock
+        opt.simulation.inverter = None
+        opt.simulation.ac_charge_hours = None
+        opt.simulation.dc_charge_hours = None
+        opt.simulation.elect_price_hourly = None
+        opt.simulation.load_energy_array = None
+        opt.simulation.pv_prediction_wh = None
+        opt.simulation.elect_revenue_per_hour_arr = None
+        opt.simulation.bat_discharge_hours = None
+        opt.evaluate_inner = lambda _ind: {
+            "Gesamtbilanz_Euro": 0.0,
+            "Gesamt_Verluste": 0.0,
+            "EAuto_SoC_pro_Stunde": np.full(prediction_hours, float(soc_percent)),
+            "akku_soc_pro_stunde": np.zeros(prediction_hours),
+        }
+        return opt
+
+    params_base = dict(
+        ems=SimpleNamespace(preis_euro_pro_wh_akku=0.0, preis_euro_pro_wh_ev=0.00022),
+        eauto=SimpleNamespace(
+            target_soc_percentage=90,
+            target_soc_time=None,
+            min_soc_percentage=10,
+            initial_soc_percentage=80,
+            max_soc_percentage=100,
+        ),
+    )
+
+    ind = DummyIndividual([0] * prediction_hours * 2)
+
+    # At target (90%): full credit = -1.98 €
+    result_at_target = _make_opt_ev(90).evaluate(
+        ind, SimpleNamespace(**params_base), start_hour=0, worst_case=False
+    )
+    assert result_at_target[0] == pytest.approx(-1.98, rel=1e-4), (
+        f"At target (90%): expected -1.98 €, got {result_at_target[0]:.4f} €"
+    )
+
+    # At 100% overshoot: -(9000 - 1000) × 0.00022 = -1.76 €
+    result_overshoot = _make_opt_ev(100).evaluate(
+        ind, SimpleNamespace(**params_base), start_hour=0, worst_case=False
+    )
+    assert result_overshoot[0] == pytest.approx(-1.76, rel=1e-4), (
+        f"At 100% (overshoot): expected -1.76 €, got {result_overshoot[0]:.4f} €"
+    )
+
+    # 90% must be strictly BETTER (lower fitness = FitnessMin) than 100%
+    assert result_at_target[0] < result_overshoot[0], (
+        f"90% fitness ({result_at_target[0]:.4f}) must be lower than "
+        f"100% fitness ({result_overshoot[0]:.4f}) — optimizer must prefer stopping at target."
+    )
