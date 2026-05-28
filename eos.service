@@ -1,0 +1,14 @@
+[Unit]
+Description=EOS Energy Optimization Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/root/EOS/eos.sh
+WorkingDirectory=/root/EOS
+TimeoutSec=0
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target
