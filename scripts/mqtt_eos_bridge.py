@@ -8,7 +8,6 @@ Connects to MQTT broker and forwards device measurements to EOS REST API.
 MQTT Topics:
 - devices/bmw_i5/cardata/drivetrain/batteryManagement/header → BMW_i5-soc-factor
 - devices/victron_battery/battery_soc → LiFePO4_Cluster-soc-factor
-- devices/victron_battery/ac_power_w + devices/victron_battery_2/ac_power_w → LiFePO4_Cluster-power-3-phase-sym-w
 
 Configuration via environment variables:
 - MQTT_BROKER (default: mqtt.fritz.box)
@@ -56,17 +55,13 @@ EOS_HEALTH_PATH = "/docs"
 EOS_PUT_TIMEOUT_S = 5
 EOS_HEALTH_TIMEOUT_S = 5
 EOS_SEND_INTERVAL_S = 60
-BATTERY_POWER_DEBOUNCE_S = 5
 MQTT_KEEPALIVE_S = 60
 
 TOPIC_BMW_SOC = "devices/bmw_i5/cardata/drivetrain/batteryManagement/header"
 TOPIC_BATTERY_SOC = "devices/victron_battery/battery_soc"
-TOPIC_BATTERY_POWER_1 = "devices/victron_battery/ac_power_w"
-TOPIC_BATTERY_POWER_2 = "devices/victron_battery_2/ac_power_w"
 
 BMW_SOC_EOS_KEY = "BMW_i5-soc-factor"
 BATTERY_SOC_EOS_KEY = "LiFePO4_Cluster-soc-factor"
-BATTERY_POWER_EOS_KEY = "LiFePO4_Cluster-power-3-phase-sym-w"
 
 BMW_SOC_DESCRIPTION = "BMW i5 State of Charge"
 BATTERY_SOC_DESCRIPTION = "Battery State of Charge"
@@ -109,23 +104,11 @@ TOPIC_MAPPING = {
     },
 }
 
-# Battery power requires summing two topics
-BATTERY_POWER_TOPICS = [
-    TOPIC_BATTERY_POWER_1,
-    TOPIC_BATTERY_POWER_2,
-]
-
-MQTT_TOPICS = sorted(set(TOPIC_MAPPING.keys()) | set(BATTERY_POWER_TOPICS))
+MQTT_TOPICS = sorted(TOPIC_MAPPING.keys())
 
 # =============================================================================
 # Global State
 # =============================================================================
-
-battery_power_cache: Dict[str, Optional[float]] = {
-    TOPIC_BATTERY_POWER_1: None,
-    TOPIC_BATTERY_POWER_2: None,
-}
-battery_power_last_update = 0.0
 
 # Track last sent values and timestamps for change detection (60 sec max)
 eos_last_values: Dict[str, Optional[float]] = {}  # key -> last sent value
@@ -248,58 +231,8 @@ def repeat_all_values():
                         value_formatted=value_formatted,
                     )
             
-            # Resend battery power if we have both values
-            if None not in battery_power_cache.values():
-                total_power = sum(battery_power_cache.values())
-                if BATTERY_POWER_EOS_KEY in eos_last_values and eos_last_values[BATTERY_POWER_EOS_KEY] is not None:
-                    # Format battery power with direction
-                    direction = 'charging' if total_power > 0 else 'discharging' if total_power < 0 else 'idle'
-                    value_formatted = f"{total_power:.1f}W ({direction})"
-                    send_measurement_to_eos(
-                        BATTERY_POWER_EOS_KEY,
-                        total_power,
-                        "Battery Power",
-                        force=True,
-                        source="repeat",
-                        value_formatted=value_formatted,
-                    )
         except Exception as e:
             logger.error(f"Error in repeat thread: {e}")
-
-
-def process_battery_power():
-    """Process battery power by summing both Victron battery readings."""
-    global battery_power_last_update
-
-    # Check if we have both values
-    if None in battery_power_cache.values():
-        logger.debug(
-            f"Battery power: waiting for both values (victron: {battery_power_cache[TOPIC_BATTERY_POWER_1]}, "
-            f"victron2: {battery_power_cache[TOPIC_BATTERY_POWER_2]})"
-        )
-        return
-
-    # Sum power values (negative=discharge, positive=charge)
-    total_power = sum(battery_power_cache.values())
-
-    # Avoid sending duplicate values too frequently (debouncing)
-    now = time.time()
-    if now - battery_power_last_update < BATTERY_POWER_DEBOUNCE_S:
-        return
-
-    battery_power_last_update = now
-
-    # Format power value with direction
-    direction = 'charging' if total_power > 0 else 'discharging' if total_power < 0 else 'idle'
-    value_formatted = f"{total_power:.1f}W ({direction})"
-    
-    send_measurement_to_eos(
-        BATTERY_POWER_EOS_KEY,
-        total_power,
-        "Battery Power",
-        source="mqtt",
-        value_formatted=value_formatted,
-    )
 
 
 # =============================================================================
@@ -350,11 +283,6 @@ def on_message(client, userdata, msg):
                 source="mqtt",
                 value_formatted=value_formatted,
             )
-
-        # Handle battery power topics (need to sum two values)
-        elif topic in battery_power_cache:
-            battery_power_cache[topic] = float(payload)
-            process_battery_power()
 
         else:
             logger.warning(f"Unknown topic: {topic}")
