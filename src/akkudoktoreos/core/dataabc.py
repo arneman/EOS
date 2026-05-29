@@ -1744,7 +1744,12 @@ class DataImportMixin(StartMixin):
         # Try dictionary with special keys start_datetime and interval
         try:
             import_data = PydanticDateTimeData.model_validate_json(json_str)
-            self.import_from_dict(import_data.to_dict())
+            self.import_from_dict(
+                import_data.to_dict(),
+                key_prefix=key_prefix,
+                start_datetime=start_datetime,
+                interval=interval,
+            )
             return
         except ValidationError as e:
             error_msg = ""
