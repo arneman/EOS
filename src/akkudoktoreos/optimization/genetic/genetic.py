@@ -875,10 +875,14 @@ class GeneticOptimization(OptimizationBase):
         # time PV production ends (first sunset after start_hour).  This ensures the
         # optimizer always plans to fill the battery during the day while the timing
         # signal (feed-in tariff variation) still influences *when* charging happens.
+        # The penalty is only applied when there is enough excess PV (after load) between
+        # now and sunset to theoretically fill the SOC gap — preventing the optimizer
+        # from grid-charging just to avoid the penalty.
         if (
             self.simulation.battery
             and getattr(parameters, "pv_akku", None)
             and self.simulation.pv_prediction_wh is not None
+            and self.simulation.load_energy_array is not None
         ):
             try:
                 battery_target_penalty = float(
@@ -889,6 +893,7 @@ class GeneticOptimization(OptimizationBase):
 
             if battery_target_penalty > 0.0:
                 pv_arr = self.simulation.pv_prediction_wh
+                load_arr = self.simulation.load_energy_array
                 horizon_end = min(start_hour + self.config.optimization.horizon_hours, len(pv_arr))
                 # Find last hour of first PV production period (first sunset)
                 last_pv_hour = None
@@ -909,9 +914,26 @@ class GeneticOptimization(OptimizationBase):
                             battery_soc_at_sunset = float(soc_arr[soc_index])
                             target_soc = float(parameters.pv_akku.max_soc_percentage)
                             if battery_soc_at_sunset < target_soc:
-                                gesamtbilanz += (
-                                    target_soc - battery_soc_at_sunset
-                                ) * battery_target_penalty
+                                # Check if enough excess PV exists to fill the gap
+                                bat = self.simulation.battery
+                                soc_gap_pct = target_soc - bat.initial_soc_percentage
+                                energy_needed_wh = (
+                                    (soc_gap_pct / 100.0)
+                                    * bat.capacity_wh
+                                    / bat.charging_efficiency
+                                )
+                                # Sum excess PV (after load) from start to sunset
+                                excess_pv_wh = 0.0
+                                for h in range(start_hour, last_pv_hour + 1):
+                                    excess = pv_arr[h] - load_arr[h]
+                                    if excess > 0:
+                                        excess_pv_wh += excess
+
+                                # Only penalise if PV alone could have filled the battery
+                                if excess_pv_wh >= energy_needed_wh:
+                                    gesamtbilanz += (
+                                        target_soc - battery_soc_at_sunset
+                                    ) * battery_target_penalty
 
         # --- AC charging break-even penalty ---
         # Penalise AC charging decisions that cannot be economically justified given the
