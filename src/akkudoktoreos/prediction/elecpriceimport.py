@@ -64,13 +64,20 @@ class ElecPriceImport(ElecPriceProvider, PredictionImportProvider):
         return "ElecPriceImport"
 
     def _update_data(self, force_update: Optional[bool] = False) -> None:
+        # Anchor to midnight so that index 0 in the data always maps to 00:00 of the
+        # current day, regardless of the hour at which EMS was started. This is required
+        # for daily HT/NT tariff schedules where the array represents a full day starting
+        # at midnight.
+        start_datetime = self.ems_start_datetime.start_of("day")
         if self.config.elecprice.elecpriceimport.import_file_path:
             self.import_from_file(
                 self.config.elecprice.elecpriceimport.import_file_path,
                 key_prefix="elecprice",
+                start_datetime=start_datetime,
             )
         if self.config.elecprice.elecpriceimport.import_json:
             self.import_from_json(
                 self.config.elecprice.elecpriceimport.import_json,
                 key_prefix="elecprice",
+                start_datetime=start_datetime,
             )
