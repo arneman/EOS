@@ -236,6 +236,10 @@ class GeneticOptimizationParameters(
         if "dc_charge_feed_in_opportunity" not in cls.config.optimization.genetic.penalties:
             # Default 0.0 keeps legacy behavior unless explicitly enabled by configuration.
             cls.config.optimization.genetic.penalties["dc_charge_feed_in_opportunity"] = 0.0
+        if "battery_soc_target_miss" not in cls.config.optimization.genetic.penalties:
+            # Default 0.0: disabled unless explicitly enabled.  When set (e.g. 15),
+            # applies a penalty of N € per % the battery is below max_soc at sunset.
+            cls.config.optimization.genetic.penalties["battery_soc_target_miss"] = 0.0
 
         # Get start solution from last run
         start_solution = None

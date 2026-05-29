@@ -870,6 +870,49 @@ class GeneticOptimization(OptimizationBase):
             restwert_akku = battery_energy_content * parameters.ems.preis_euro_pro_wh_akku
             gesamtbilanz += -restwert_akku
 
+        # --- Battery target SOC at sunset penalty ---
+        # Penalise solutions where the battery does not reach max_soc_percentage by the
+        # time PV production ends (first sunset after start_hour).  This ensures the
+        # optimizer always plans to fill the battery during the day while the timing
+        # signal (feed-in tariff variation) still influences *when* charging happens.
+        if (
+            self.simulation.battery
+            and getattr(parameters, "pv_akku", None)
+            and self.simulation.pv_prediction_wh is not None
+        ):
+            try:
+                battery_target_penalty = float(
+                    self.config.optimization.genetic.penalties["battery_soc_target_miss"]
+                )
+            except Exception:
+                battery_target_penalty = 0.0
+
+            if battery_target_penalty > 0.0:
+                pv_arr = self.simulation.pv_prediction_wh
+                horizon_end = min(start_hour + self.config.optimization.horizon_hours, len(pv_arr))
+                # Find last hour of first PV production period (first sunset)
+                last_pv_hour = None
+                found_pv = False
+                for hour in range(start_hour, horizon_end):
+                    if pv_arr[hour] > 0:
+                        found_pv = True
+                        last_pv_hour = hour
+                    elif found_pv:
+                        # PV just dropped to zero — first sunset
+                        break
+
+                if last_pv_hour is not None:
+                    soc_arr = simulation_result.get("akku_soc_pro_stunde")
+                    if soc_arr is not None:
+                        soc_index = last_pv_hour - start_hour
+                        if 0 <= soc_index < len(soc_arr):
+                            battery_soc_at_sunset = float(soc_arr[soc_index])
+                            target_soc = float(parameters.pv_akku.max_soc_percentage)
+                            if battery_soc_at_sunset < target_soc:
+                                gesamtbilanz += (
+                                    target_soc - battery_soc_at_sunset
+                                ) * battery_target_penalty
+
         # --- AC charging break-even penalty ---
         # Penalise AC charging decisions that cannot be economically justified given the
         # round-trip losses (AC→DC charge conversion, battery internal, DC→AC discharge
