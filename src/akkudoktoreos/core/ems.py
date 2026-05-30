@@ -266,7 +266,7 @@ class EnergyManagement(
             solution = optimization.optimierung_ems(
                 start_hour=cls._start_datetime.hour,
                 parameters=genetic_parameters,
-                ngen=genetic_individuals,
+                ngen=None,
             )
         except:
             logger.exception("Energy management optimization failed.")
