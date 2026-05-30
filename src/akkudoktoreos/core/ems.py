@@ -1,3 +1,4 @@
+import gc
 import traceback
 from asyncio import Lock, get_running_loop
 from concurrent.futures import ThreadPoolExecutor
@@ -272,6 +273,10 @@ class EnergyManagement(
             logger.exception("Energy management optimization failed.")
             cls._stage = EnergyManagementStage.IDLE
             return
+        finally:
+            # Force collection of DEAP cyclic references (Individual/FitnessMin objects
+            # and their cross-references are not freed by reference counting alone).
+            gc.collect()
 
         cls._stage = EnergyManagementStage.CONTROL_DISPATCH
 
