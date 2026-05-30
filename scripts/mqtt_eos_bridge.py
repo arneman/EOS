@@ -64,7 +64,8 @@ EOS_HEALTH_PATH = "/docs"
 EOS_PUT_TIMEOUT_S = 5
 EOS_HEALTH_TIMEOUT_S = 5
 EOS_SEND_INTERVAL_S = 60
-EOS_POLL_INTERVAL_S = 60  # How often to poll EOS solution
+EOS_POLL_INTERVAL_S = 30  # How often to poll EOS solution (baseline)
+EOS_HEALTH_CHECK_INTERVAL_S = 5  # How often to check for a new optimization result
 MQTT_KEEPALIVE_S = 60
 
 # MQTT Publish topics (EOS → MQTT)
@@ -413,17 +414,52 @@ def get_active_mode(row: dict, prefix: str = "battery1") -> tuple[str, float]:
 
 
 def poll_eos_solution():
-    """Background thread: poll EOS solution and publish current state to MQTT."""
-    logger.info(f"Starting EOS solution poller (every {EOS_POLL_INTERVAL_S}s)...")
+    """Background thread: poll EOS solution and publish current state to MQTT.
+
+    Wakes every EOS_HEALTH_CHECK_INTERVAL_S seconds to check for a new
+    optimization result via /v1/health. Publishes immediately when
+    last_run_datetime changes, and also every EOS_POLL_INTERVAL_S seconds
+    as a baseline refresh.
+    """
+    logger.info(
+        f"Starting EOS solution poller (every {EOS_POLL_INTERVAL_S}s, "
+        f"new optimization detected within {EOS_HEALTH_CHECK_INTERVAL_S}s)..."
+    )
     last_mode = None
     last_factor = None
+    last_run_datetime: Optional[str] = None
+    last_publish_ts: float = 0.0
 
     while repeat_thread_running:
         try:
-            time.sleep(EOS_POLL_INTERVAL_S)
+            time.sleep(EOS_HEALTH_CHECK_INTERVAL_S)
             if not repeat_thread_running:
                 break
             if mqtt_client is None or not mqtt_client.is_connected():
+                continue
+
+            now_ts = time.time()
+            time_since_publish = now_ts - last_publish_ts
+
+            # Check if a new optimization has completed via health endpoint
+            new_optimization = False
+            try:
+                health_resp = requests.get(
+                    f"{EOS_URL}/v1/health",
+                    timeout=EOS_PUT_TIMEOUT_S,
+                )
+                health_resp.raise_for_status()
+                health_data = health_resp.json()
+                current_last_run = health_data.get("energy-management", {}).get("last_run_datetime")
+                if last_run_datetime is not None and current_last_run != last_run_datetime:
+                    logger.info(f"(eos→mqtt) New optimization result detected: {current_last_run}")
+                    new_optimization = True
+                last_run_datetime = current_last_run
+            except requests.exceptions.RequestException as e:
+                logger.debug(f"Health check failed: {e}")
+
+            # Publish if: new optimization detected OR periodic interval elapsed
+            if not new_optimization and time_since_publish < EOS_POLL_INTERVAL_S:
                 continue
 
             # Fetch solution from EOS
@@ -495,6 +531,8 @@ def poll_eos_solution():
                     "soc": round(r.get("battery1_soc_factor", 0.0), 3),
                 })
             mqtt_client.publish(MQTT_PUB_SCHEDULE, json.dumps(schedule), retain=True)
+
+            last_publish_ts = now_ts
 
             # Log on change
             if mode != last_mode or factor != last_factor:
