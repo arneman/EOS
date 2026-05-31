@@ -66,6 +66,15 @@ class GeneticCommonSettings(SettingsBaseModel):
     )
 
 
+class MarketResponsiveCommonSettings(SettingsBaseModel):
+    """Settings for market-responsive optimization weighting."""
+
+    enabled: bool = Field(default=False)
+    spot_price_weight: float = Field(default=0.0)
+    co2_weight: float = Field(default=0.0)
+    co2_prediction_key: Optional[str] = Field(default=None)
+
+
 class OptimizationCommonSettings(SettingsBaseModel):
     """General Optimization Configuration."""
 
@@ -101,6 +110,13 @@ class OptimizationCommonSettings(SettingsBaseModel):
         json_schema_extra={
             "description": "Genetic optimization algorithm configuration.",
             "examples": [{"individuals": 400, "seed": None, "penalties": {"ev_soc_miss": 10}}],
+        },
+    )
+
+    market_responsive: Optional[MarketResponsiveCommonSettings] = Field(
+        default=None,
+        json_schema_extra={
+            "description": "Market-responsive optimization weighting settings.",
         },
     )
 
