@@ -277,17 +277,50 @@ class HomeApplianceCommonSettings(DevicesBaseSettings):
 class HybridPVInverterCommonSettings(DevicesBaseSettings):
     """Hybrid PV inverter device settings."""
 
-    peakpower_kw: float = Field(gt=0, json_schema_extra={"description": "Nominal peak power [kWp]."})
-    feed_in_tariff_full_kwh: float = Field(ge=0, json_schema_extra={"description": "Feed-in tariff in FULL_FEED_IN mode [€/kWh]."})
-    feed_in_tariff_excess_kwh: float = Field(ge=0, json_schema_extra={"description": "Feed-in tariff in EXCESS mode [€/kWh]."})
+    peakpower_kw: float = Field(
+        gt=0, json_schema_extra={"description": "Nominal peak power [kWp]."}
+    )
+    feed_in_tariff_full_kwh: float = Field(
+        ge=0, json_schema_extra={"description": "Feed-in tariff in FULL_FEED_IN mode [€/kWh]."}
+    )
+    feed_in_tariff_excess_kwh: float = Field(
+        ge=0, json_schema_extra={"description": "Feed-in tariff in EXCESS mode [€/kWh]."}
+    )
     mode: str = Field(default="EXCESS", json_schema_extra={"description": "Initial feed-in mode."})
-    max_mode_switches_per_day: int = Field(default=6, ge=0, json_schema_extra={"description": "Soft switch limit per 24h."})
-    min_production_threshold_w: float = Field(default=10.0, ge=0, json_schema_extra={"description": "Force EXCESS below this production threshold [W]."})
-    minutes_before_sunset: int = Field(default=30, ge=0, json_schema_extra={"description": "Force EXCESS this many minutes before sunset."})
-    standby_loss_w: float = Field(default=1.0, ge=0, json_schema_extra={"description": "Standby losses in FULL_FEED_IN mode [W]."})
-    switch_penalty_base_eur: float = Field(default=0.02, ge=0, json_schema_extra={"description": "Base penalty for soft-limit switch violations [€]."})
-    switch_penalty_exp: float = Field(default=1.8, ge=1.0, json_schema_extra={"description": "Exponent for switch penalty growth."})
-    forecast_share: Optional[float] = Field(default=None, ge=0, le=1, json_schema_extra={"description": "Optional explicit forecast share [0..1]."})
+    max_mode_switches_per_day: int = Field(
+        default=6, ge=0, json_schema_extra={"description": "Soft switch limit per 24h."}
+    )
+    min_production_threshold_w: float = Field(
+        default=10.0,
+        ge=0,
+        json_schema_extra={"description": "Force EXCESS below this production threshold [W]."},
+    )
+    minutes_before_sunset: int = Field(
+        default=30,
+        ge=0,
+        json_schema_extra={"description": "Force EXCESS this many minutes before sunset."},
+    )
+    standby_loss_w: float = Field(
+        default=1.0,
+        ge=0,
+        json_schema_extra={"description": "Standby losses in FULL_FEED_IN mode [W]."},
+    )
+    switch_penalty_base_eur: float = Field(
+        default=0.02,
+        ge=0,
+        json_schema_extra={"description": "Base penalty for soft-limit switch violations [€]."},
+    )
+    switch_penalty_exp: float = Field(
+        default=1.8,
+        ge=1.0,
+        json_schema_extra={"description": "Exponent for switch penalty growth."},
+    )
+    forecast_share: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        json_schema_extra={"description": "Optional explicit forecast share [0..1]."},
+    )
 
 
 class DevicesCommonSettings(SettingsBaseModel):
