@@ -990,7 +990,21 @@ class GeneticOptimization(OptimizationBase):
                 except Exception:
                     ac_penalty_factor = 1.0
 
-                for hour in range(start_hour, min(len(ac_charge_arr), n)):
+                # Precompute sorted (price, load) tuples for all future hours once.
+                # Each charging hour needs the subset of hours after it, but since
+                # we sort by descending price, we can build the sorted list once and
+                # use a index-based slice for each hour.
+                horizon_end = min(len(ac_charge_arr), n)
+                # Build indexed list: (price, load, original_hour)
+                indexed_future = sorted(
+                    (
+                        (float(prices_arr[h]), float(load_arr[h]), h)
+                        for h in range(start_hour, horizon_end)
+                    ),
+                    key=lambda x: -x[0],
+                )
+
+                for hour in range(start_hour, horizon_end):
                     ac_factor = ac_charge_arr[hour]
                     if ac_factor <= 0.0:
                         continue
@@ -1002,24 +1016,16 @@ class GeneticOptimization(OptimizationBase):
                     # Price that a future discharge hour must reach to break even
                     break_even_price = charge_price / round_trip_eff
 
-                    # Build list of (price, load_wh) for all future hours in the horizon
-                    future = [
-                        (float(prices_arr[h]), float(load_arr[h])) for h in range(hour + 1, n)
-                    ]
-                    # Sort descending by price so we "use" the most expensive hours first
-                    future.sort(key=lambda x: -x[0])
-
-                    # Consume free PV energy against the highest-price future hours.
-                    # The first uncovered (partially or fully) hour defines the best
-                    # price still available for the new AC charge.
+                    # Consume free PV energy against the highest-price FUTURE hours.
+                    # Only consider hours strictly after the current charging hour.
                     remaining_free = free_ac_wh
                     best_uncovered_price = 0.0
-                    for fp, fl in future:
+                    for fp, fl, fh in indexed_future:
+                        if fh <= hour:
+                            continue  # skip hours not in the future
                         if remaining_free >= fl:
-                            # Entire expensive hour is already covered by free PV energy
                             remaining_free -= fl
                         else:
-                            # First hour not (fully) covered: this is where new charge goes
                             best_uncovered_price = fp
                             break
 

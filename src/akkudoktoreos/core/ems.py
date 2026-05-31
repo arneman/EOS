@@ -1,3 +1,4 @@
+import asyncio
 import gc
 import traceback
 from asyncio import Lock, get_running_loop
@@ -389,5 +390,14 @@ class EnergyManagement(
                 force_enable=force_enable,
                 force_update=force_update,
             )
-            # Run optimization in background thread to avoid blocking event loop
-            await loop.run_in_executor(executor, func)
+            # Run optimization in background thread with timeout to prevent
+            # the server from becoming permanently unresponsive.
+            timeout_sec = max(float(self.config.ems.interval) * 4, 300.0)
+            try:
+                await asyncio.wait_for(loop.run_in_executor(executor, func), timeout=timeout_sec)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Energy management run timed out after {}s — skipping this run.",
+                    int(timeout_sec),
+                )
+                cls._stage = EnergyManagementStage.IDLE

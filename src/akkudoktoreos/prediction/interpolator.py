@@ -1,11 +1,11 @@
 #!/usr/bin/env python
+import math
 import pickle
 from pathlib import Path
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 
-from akkudoktoreos.core.cache import cache_energy_management
 from akkudoktoreos.core.coreabc import SingletonMixin
 
 
@@ -16,68 +16,52 @@ class SelfConsumptionProbabilityInterpolator:
         with open(self.filepath, "rb") as file:
             self.interpolator: RegularGridInterpolator = pickle.load(file)  # noqa: S301
 
-    def _generate_points(
-        self, load_1h_power: float, pv_power: float
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Generate the grid points for interpolation."""
-        partial_loads = np.arange(0, pv_power + 50, 50)
-        points = np.array([np.full_like(partial_loads, load_1h_power), partial_loads]).T
-        return points, partial_loads
+        # Precompute cumulative sum lookup table for O(1) self-consumption calculation.
+        # The interpolator grid uses a uniform 50W step on both axes, and
+        # calculate_self_consumption always evaluates at PV grid points (multiples of 50),
+        # so bilinear interpolation reduces to a weighted sum of precomputed partial sums.
+        values = self.interpolator.values
+        self._n_load = values.shape[0]  # number of load grid points
+        self._n_pv = values.shape[1]  # number of PV grid points
+        self._load_step = float(self.interpolator.grid[0][1] - self.interpolator.grid[0][0])
+        self._load_max = float(self.interpolator.grid[0][-1])
+        # cumsum[i, k] = sum of values[i, 0:k] (prepend zero column for k=0)
+        self._cumsum = np.zeros((self._n_load, self._n_pv + 1))
+        self._cumsum[:, 1:] = np.cumsum(values, axis=1)
 
-    @cache_energy_management
     def calculate_self_consumption(self, load_1h_power: float, pv_power: float) -> float:
-        """Calculate the PV self-consumption rate using RegularGridInterpolator.
+        """Calculate the PV self-consumption rate.
 
-        The results are cached until the start of the next energy management run/ optimization.
+        Uses a precomputed cumulative sum lookup table for O(1) evaluation,
+        giving mathematically identical results to the full RegularGridInterpolator
+        evaluation over partial loads.
 
         Args:
-         - last_1h_power: 1h power levels (W).
+         - load_1h_power: 1h power level (W).
          - pv_power: Current PV power output (W).
 
         Returns:
          - Self-consumption rate as a float.
         """
-        points, partial_loads = self._generate_points(load_1h_power, pv_power)
-        probabilities = self.interpolator(points)
-        return probabilities.sum()
+        # Number of PV grid points to sum (matches np.arange(0, pv_power + 50, 50))
+        n_pv_points = min(math.ceil((pv_power + 50.0) / 50.0), self._n_pv)
 
-    # def calculate_self_consumption(self, load_1h_power: float, pv_power: float) -> float:
-    #     """Calculate the PV self-consumption rate using RegularGridInterpolator.
+        # Out-of-bounds load returns 0 (matches interpolator fill_value=0)
+        if load_1h_power < 0.0 or load_1h_power > self._load_max:
+            return 0.0
 
-    #     Args:
-    #     - last_1h_power: 1h power levels (W).
-    #     - pv_power: Current PV power output (W).
+        # Find load grid position for bilinear weighting
+        idx = load_1h_power / self._load_step
+        i = int(idx)
+        if i >= self._n_load - 1:
+            # At or beyond last grid point — clamp
+            i = self._n_load - 2
+            frac = 1.0
+        else:
+            frac = idx - i
 
-    #     Returns:
-    #     - Self-consumption rate as a float.
-    #     """
-    #     # Generate the range of partial loads (0 to last_1h_power)
-    #     partial_loads = np.arange(0, pv_power + 50, 50)
-
-    #     # Get probabilities for all partial loads
-    #     points = np.array([np.full_like(partial_loads, load_1h_power), partial_loads]).T
-    #     if self.interpolator == None:
-    #         return -1.0
-    #     probabilities = self.interpolator(points)
-    #     self_consumption_rate = probabilities.sum()
-
-    #     # probabilities = probabilities / (np.sum(probabilities))  # / (pv_power / 3450))
-    #     # # for i, w in enumerate(partial_loads):
-    #     # #    print(w, ": ", probabilities[i])
-    #     # print(probabilities.sum())
-
-    #     # # Ensure probabilities are within [0, 1]
-    #     # probabilities = np.clip(probabilities, 0, 1)
-
-    #     # # Mask: Only include probabilities where the load is <= PV power
-    #     # mask = partial_loads <= pv_power
-
-    #     # # Calculate the cumulative probability for covered loads
-    #     # self_consumption_rate = np.sum(probabilities[mask]) / np.sum(probabilities)
-    #     # print(self_consumption_rate)
-    #     # sys.exit()
-
-    #     return self_consumption_rate
+        # Weighted sum of precomputed cumulative values — exact bilinear result
+        return (1.0 - frac) * self._cumsum[i, n_pv_points] + frac * self._cumsum[i + 1, n_pv_points]
 
 
 class EOSLoadInterpolator(SelfConsumptionProbabilityInterpolator, SingletonMixin):
