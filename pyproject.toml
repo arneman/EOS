@@ -16,36 +16,36 @@ classifiers = [
 dependencies = [
     "babel==2.18.0",
     "beautifulsoup4==4.14.3",
-    "cachebox==5.2.2",
-    "numpy==2.4.2",
-    "numpydantic==1.8.0",
-    "matplotlib==3.10.8",
+    "cachebox==5.2.3",
+    "numpy==2.4.6",
+    "numpydantic==1.8.1",
+    "matplotlib==3.10.9",
     "contourpy==1.3.3",
-    "fastapi[standard-no-fastapi-cloud-cli]==0.135.1",
+    "fastapi[standard-no-fastapi-cloud-cli]==0.136.3",
     "fastapi_cli==0.0.24",
-    "rich-toolkit==0.19.7",
-    "python-fasthtml==0.12.48",
-    "MonsterUI==1.0.44",
-    "markdown-it-py==4.0.0",
-    "mdit-py-plugins==0.5.0",
-    "bokeh==3.8.2",
-    "uvicorn==0.41.0",
+    "rich-toolkit==0.19.10",
+    "python-fasthtml==0.14.2",
+    "MonsterUI==1.0.45",
+    "markdown-it-py==4.2.0",
+    "mdit-py-plugins==0.6.1",
+    "bokeh==3.9.0",
+    "uvicorn==0.48.0",
     "scipy==1.17.1",
-    "tzfpy==1.1.1",
-    "deap==1.4.3",
-    "requests==2.32.5",
-    "pandas==3.0.1",
+    "tzfpy==1.3.1",
+    "deap==1.4.4",
+    "requests==2.34.2",
+    "pandas==3.0.3",
     "pendulum==3.2.0",
-    "platformdirs==4.9.2",
+    "platformdirs==4.10.0",
     "psutil==7.2.2",
-    "pvlib==0.15.0",
-    "pydantic==2.12.5",
-    "pydantic_extra_types==2.11.0",
+    "pvlib==0.15.1",
+    "pydantic==2.13.4",
+    "pydantic_extra_types==2.11.2",
     "statsmodels==0.14.6",
-    "pydantic-settings==2.13.1",
+    "pydantic-settings==2.14.1",
     "linkify-it-py==2.1.0",
     "loguru==0.7.3",
-    "lmdb==1.7.5",
+    "lmdb==2.2.0",
     "paho-mqtt>=2.1.0",
 ]
 
@@ -60,28 +60,28 @@ dev = [
     # - commitizen - sync with requirements-dev.txt (if on pypi)
     #
     # !!! Sync .pre-commit-config.yaml with these dependencies !!!
-    "pre-commit==4.5.1",
-    "mypy==1.19.1",
-    "types-requests==2.32.4.20260107", # for mypy
+    "pre-commit==4.6.0",
+    "mypy==2.1.0",
+    "types-requests==2.33.0.20260518", # for mypy
     "pandas-stubs==3.0.0.260204", # for mypy
     "tokenize-rt==6.2.0", # for mypy
-    "types-docutils==0.22.3.20260223", # for mypy
-    "types-PyYaml==6.0.12.20250915", # for mypy
-    "commitizen==4.13.9",
+    "types-docutils==0.22.3.20260518", # for mypy
+    "types-PyYaml==6.0.12.20260518", # for mypy
+    "commitizen==4.16.2",
     "deprecated==1.3.1", # for commitizen
     # Sphinx
     "sphinx==9.0.4",
     "sphinx_rtd_theme==3.1.0",
-    "sphinx-tabs==3.4.7",
-    "GitPython==3.1.46",
-    "myst-parser==5.0.0",
+    "sphinx-tabs==3.5.0",
+    "GitPython==3.1.50",
+    "myst-parser==5.1.0",
     "docutils==0.21.2",
     # Pytest
-    "pytest==9.0.2",
-    "pytest-asyncio==1.3.0",
-    "pytest-cov==7.0.0",
+    "pytest==9.0.3",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
     "pytest-xprocess==1.0.2",
-    "coverage==7.13.4",
+    "coverage==7.14.1",
 ]
 
 [project.urls]

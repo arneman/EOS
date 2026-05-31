@@ -226,7 +226,7 @@ class GeneticOptimizationParameters(
             logger.info("Genetic penalties unknown - defaulting to demo config.")
             cls.config.optimization.genetic.penalties = {"ev_soc_miss": 10}
         if "ev_soc_miss" not in cls.config.optimization.genetic.penalties:
-            logger.info("ev_soc_miss penalty function parameter unknown - defaulting to 10.")
+            logger.info("Genetic penalties unknown - defaulting to ev_soc_miss = 10.")
             cls.config.optimization.genetic.penalties["ev_soc_miss"] = 10
         if "ac_charge_break_even" not in cls.config.optimization.genetic.penalties:
             # Default multiplier 1.0: penalty equals the exact economic loss in € from
@@ -429,6 +429,7 @@ class GeneticOptimizationParameters(
                         max_charge_power_w=battery_config.max_charge_power_w,
                         min_soc_percentage=battery_config.min_soc_percentage,
                         max_soc_percentage=battery_config.max_soc_percentage,
+                        charge_rates=battery_config.charge_rates,
                     )
                 except:
                     logger.info(

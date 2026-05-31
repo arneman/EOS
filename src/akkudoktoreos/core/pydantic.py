@@ -1023,7 +1023,12 @@ class PydanticDateTimeDataFrame(PydanticBaseModel):
             return v
 
         # Validate consistent columns
-        columns = set(next(iter(v.values())).keys())
+        try:
+            columns = set(next(iter(v.values())).keys())
+        except AttributeError:
+            raise ValueError(
+                "Data values must be dicts (DataFrame format), not scalars. Use DateTimeData or DateTimeSeries format instead."
+            )
         if not all(set(row.keys()) == columns for row in v.values()):
             raise ValueError("All rows must have the same columns")
 
@@ -1136,9 +1141,13 @@ class PydanticDateTimeDataFrame(PydanticBaseModel):
         data_tz = cls._detect_data_tz(df)
 
         if tz is not None:
-            if data_tz and data_tz != tz:
-                raise ValueError(f"Timezone mismatch: tz='{tz}' but data uses '{data_tz}'")
             resolved_tz = tz
+            if data_tz and data_tz != tz:
+                warning_msg = (
+                    f"Forcing Pydantic dataframe timezone to '{resolved_tz}' - "
+                    f"data timezone was '{data_tz}'."
+                )
+                logger.warning(warning_msg)
         else:
             if data_tz:
                 resolved_tz = data_tz

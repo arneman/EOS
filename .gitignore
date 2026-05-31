@@ -263,3 +263,5 @@ tests/testdata/config-new.md
 
 # FastHTML session key
 .sesskey
+.mqtt_password
+EOS.config.[0-9]*

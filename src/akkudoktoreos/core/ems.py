@@ -3,7 +3,7 @@ import gc
 import traceback
 from asyncio import Lock, get_running_loop
 from concurrent.futures import ThreadPoolExecutor
-from enum import Enum
+from enum import StrEnum
 from functools import partial
 from typing import ClassVar, Optional
 
@@ -32,7 +32,7 @@ from akkudoktoreos.utils.datetimeutil import DateTime, to_datetime
 executor = ThreadPoolExecutor(max_workers=1)
 
 
-class EnergyManagementStage(Enum):
+class EnergyManagementStage(StrEnum):
     """Enumeration of the main stages in the energy management lifecycle."""
 
     IDLE = "IDLE"
@@ -40,10 +40,6 @@ class EnergyManagementStage(Enum):
     FORECAST_RETRIEVAL = "FORECAST_RETRIEVAL"
     OPTIMIZATION = "OPTIMIZATION"
     CONTROL_DISPATCH = "CONTROL_DISPATCH"
-
-    def __str__(self) -> str:
-        """Return the string representation of the stage."""
-        return self.value
 
 
 async def ems_manage_energy() -> None:
@@ -156,8 +152,8 @@ class EnergyManagement(
     @classmethod
     def _run(
         cls,
-        start_datetime: Optional[DateTime] = None,
-        mode: Optional[EnergyManagementMode] = None,
+        start_datetime: DateTime,
+        mode: EnergyManagementMode,
         genetic_parameters: Optional[GeneticOptimizationParameters] = None,
         genetic_individuals: Optional[int] = None,
         genetic_seed: Optional[int] = None,
@@ -172,14 +168,11 @@ class EnergyManagement(
         optimization depending on the selected mode or configuration.
 
         Args:
-            start_datetime (DateTime, optional): The starting timestamp
-                of the energy management run. Defaults to the current datetime
-                if not provided.
-            mode (EnergyManagementMode, optional): The management mode to use. Must be one of:
+            start_datetime (DateTime): The starting timestamp of the energy management run.
+            mode (EnergyManagementMode): The management mode to use. Must be one of:
                 - "OPTIMIZATION": Runs the optimization process.
                 - "PREDICTION": Updates the forecast without optimization.
-
-                Defaults to the mode defined in the current configuration.
+                - "DISABLED": Does not run.
             genetic_parameters (GeneticOptimizationParameters, optional): The
                 parameter set for the genetic algorithm. If not provided, it will
                 be constructed based on the current configuration and predictions.
@@ -198,8 +191,10 @@ class EnergyManagement(
             None
         """
         # Ensure there is only one optimization/ energy management run at a time
-        if mode not in (None, "PREDICTION", "OPTIMIZATION"):
+        if not mode in EnergyManagementMode._value2member_map_:
             raise ValueError(f"Unknown energy management mode {mode}.")
+        if mode == EnergyManagementMode.DISABLED:
+            return
 
         logger.info("Starting energy management run.")
 
@@ -217,14 +212,12 @@ class EnergyManagement(
             cls.adapter.update_data(force_enable)
         except Exception as e:
             trace = "".join(traceback.TracebackException.from_exception(e).format())
-            error_msg = f"Adapter update failed - phase {cls._stage}: {e}\n{trace}"
+            error_msg = f"Adapter update failed - phase {cls._stage}:\n{e}\n{trace}"
             logger.error(error_msg)
 
         cls._stage = EnergyManagementStage.FORECAST_RETRIEVAL
 
-        if mode is None:
-            mode = cls.config.ems.mode
-        if mode is None or mode == "PREDICTION":
+        if mode == EnergyManagementMode.PREDICTION:
             # Update the predictions
             cls.prediction.update_data(force_enable=force_enable, force_update=force_update)
             # Remember energy run datetime.
@@ -309,7 +302,7 @@ class EnergyManagement(
             cls.adapter.update_data(force_enable)
         except Exception as e:
             trace = "".join(traceback.TracebackException.from_exception(e).format())
-            error_msg = f"Adapter update failed - phase {cls._stage}: {e}\n{trace}"
+            error_msg = f"Adapter update failed - phase {cls._stage}:\n{e}\n{trace}"
             logger.error(error_msg)
 
         # Remember energy run datetime.
@@ -380,6 +373,10 @@ class EnergyManagement(
 
             loop = get_running_loop()
             # Create a partial function with parameters "baked in"
+            if start_datetime is None:
+                start_datetime = to_datetime()
+            if mode is None:
+                mode = self.config.ems.mode
             func = partial(
                 EnergyManagement._run,
                 start_datetime=start_datetime,

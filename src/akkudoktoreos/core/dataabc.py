@@ -10,6 +10,7 @@ and manipulation of configuration and generic data in a clear, scalable, and str
 
 import difflib
 import json
+import traceback
 from abc import abstractmethod
 from collections.abc import KeysView, MutableMapping
 from itertools import chain
@@ -679,6 +680,10 @@ class DataSequence(DataABC, DatabaseRecordProtocolMixin[DataRecord]):
             The matching DataRecord, the nearest DataRecord within the specified time window
             if no exact match exists, or ``None`` if no suitable record is found.
         """
+        # Ensure target_datetime is a datetime object
+        if not isinstance(target_datetime, DateTime):
+            target_datetime = to_datetime(target_datetime)
+
         # Ensure datetime objects are normalized
         db_target = DatabaseTimestamp.from_datetime(target_datetime)
 
@@ -701,6 +706,10 @@ class DataSequence(DataABC, DatabaseRecordProtocolMixin[DataRecord]):
         Raises:
             ValueError: If ``time_window`` is negative.
         """
+        # Ensure target_datetime is a datetime object
+        if not isinstance(target_datetime, DateTime):
+            target_datetime = to_datetime(target_datetime)
+
         # Ensure datetime objects are normalized
         db_target = DatabaseTimestamp.from_datetime(target_datetime)
 
@@ -778,6 +787,10 @@ class DataSequence(DataABC, DatabaseRecordProtocolMixin[DataRecord]):
         # Validate all keys are writable
         for key in values:
             self._validate_key_writable(key)
+
+        # Ensure date is a datetime object
+        if not isinstance(date, DateTime):
+            date = to_datetime(date)
 
         # Ensure datetime objects are normalized
         db_target = DatabaseTimestamp.from_datetime(date)
@@ -1108,6 +1121,8 @@ class DataSequence(DataABC, DatabaseRecordProtocolMixin[DataRecord]):
             interval = to_duration("1 hour")
             resample_freq = "1h"
         else:
+            # Ensure interval is normalized
+            interval = to_duration(interval)
             resample_freq = to_duration(interval, as_string="pandas")
 
         # Extend window for context resampling
@@ -2011,8 +2026,15 @@ class DataContainer(SingletonMixin, DataABC, MutableMapping):
         for provider in self.providers:
             try:
                 provider.update_data(force_enable=force_enable, force_update=force_update)
-            except Exception as ex:
-                error = f"Provider {provider.provider_id()} fails on update - enabled={provider.enabled()}, force_enable={force_enable}, force_update={force_update}: {ex}"
+            except Exception as e:
+                trace = "".join(traceback.TracebackException.from_exception(e).format())
+                error = (
+                    f"Provider {provider.provider_id()} fails on update - "
+                    f"enabled={provider.enabled()}, "
+                    f"force_enable={force_enable}, "
+                    f"force_update={force_update}"
+                    f":\n{e}\n{trace}"
+                )
                 if provider.enabled():
                     # The active provider failed — this is a real error worth propagating.
                     logger.error(error)

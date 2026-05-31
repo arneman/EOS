@@ -23,7 +23,11 @@ from pydantic import Field, computed_field, field_validator
 
 # settings
 from akkudoktoreos.adapter.adapter import AdapterCommonSettings
-from akkudoktoreos.config.configabc import SettingsBaseModel
+from akkudoktoreos.config.configabc import (
+    ConfigSaveMode,
+    SettingsBaseModel,
+    is_home_assistant_addon,
+)
 from akkudoktoreos.config.configmigrate import migrate_config_data, migrate_config_file
 from akkudoktoreos.core.cachesettings import CacheCommonSettings
 from akkudoktoreos.core.coreabc import SingletonMixin
@@ -32,6 +36,7 @@ from akkudoktoreos.core.decorators import classproperty
 from akkudoktoreos.core.emsettings import (
     EnergyManagementCommonSettings,
 )
+from akkudoktoreos.core.logabc import LOGGING_LEVELS
 from akkudoktoreos.core.logsettings import LoggingCommonSettings
 from akkudoktoreos.core.pydantic import PydanticModelNestedValueMixin, merge_models
 from akkudoktoreos.core.version import __version__
@@ -44,6 +49,7 @@ from akkudoktoreos.prediction.load import LoadCommonSettings
 from akkudoktoreos.prediction.prediction import PredictionCommonSettings
 from akkudoktoreos.prediction.pvforecast import PVForecastCommonSettings
 from akkudoktoreos.prediction.weather import WeatherCommonSettings
+from akkudoktoreos.server.rest.cli import cli_argument_parser
 from akkudoktoreos.server.server import ServerCommonSettings
 from akkudoktoreos.utils.datetimeutil import to_datetime, to_timezone
 from akkudoktoreos.utils.utils import UtilsCommonSettings
@@ -65,14 +71,6 @@ def get_absolute_path(
     if basepath is not None:
         return basepath.joinpath(subpath)
     return None
-
-
-def is_home_assistant_addon() -> bool:
-    """Detect Home Assistant add-on environment.
-
-    Home Assistant sets this environment variable automatically.
-    """
-    return "HASSIO_TOKEN" in os.environ or "SUPERVISOR_TOKEN" in os.environ
 
 
 def default_data_folder_path() -> Path:
@@ -123,17 +121,36 @@ def default_data_folder_path() -> Path:
 class GeneralSettings(SettingsBaseModel):
     """General settings."""
 
+    config_save_mode: ConfigSaveMode = Field(
+        default=ConfigSaveMode.AUTOMATIC,
+        json_schema_extra={
+            "description": (
+                "Configuration file save mode for configuration changes "
+                "['MANUAL', 'AUTOMATIC']. Defaults to 'AUTOMATIC'."
+            ),
+        },
+        examples=["AUTOMATIC", "MANUAL"],
+    )
+
+    config_save_interval_sec: int = Field(
+        default=60,
+        ge=5,
+        json_schema_extra={
+            "description": ("Automatic configuration file saving interval [seconds]."),
+            "examples": [60],
+        },
+    )
+
     home_assistant_addon: bool = Field(
         default_factory=is_home_assistant_addon,
         json_schema_extra={"description": "EOS is running as home assistant add-on."},
         exclude=True,
     )
 
-    version: str = Field(
-        default=__version__,
-        json_schema_extra={
-            "description": "Configuration file version. Used to check compatibility."
-        },
+    version: Optional[str] = Field(
+        default=None,  # keep None here, will be set elsewhere
+        json_schema_extra={"description": "Configuration file version."},
+        examples=["0.0.0"],
     )
 
     data_folder_path: Path = Field(
@@ -194,18 +211,6 @@ class GeneralSettings(SettingsBaseModel):
         return self.config._config_file_path
 
     compatible_versions: ClassVar[list[str]] = [__version__]
-
-    @field_validator("version")
-    @classmethod
-    def check_version(cls, v: str) -> str:
-        if v not in cls.compatible_versions:
-            error = (
-                f"Incompatible configuration version '{v}'. "
-                f"Expected: {', '.join(cls.compatible_versions)}."
-            )
-            logger.error(error)
-            raise ValueError(error)
-        return v
 
     @field_validator("data_folder_path", mode="after")
     @classmethod
@@ -378,6 +383,7 @@ class ConfigEOS(SingletonMixin, SettingsEOSDefaults):
         "with_file_secret_settings": True,
     }
     _config_file_path: ClassVar[Optional[Path]] = None
+    _config_autosave: ClassVar[str] = ""
     _force_documentation_mode = False
 
     def __hash__(self) -> int:
@@ -433,6 +439,62 @@ class ConfigEOS(SingletonMixin, SettingsEOSDefaults):
               configuration directory cannot be created.
             - It ensures that a fallback to a default configuration file is always possible.
         """
+
+        def lazy_config_cli_settings() -> dict:
+            """CLI settings.
+
+            This function runs at **instance creation**, not class definition. Ensures if ConfigEOS
+            is recreated this function is run.
+            """
+            args, args_unknown = cli_argument_parser().parse_known_args()  # defaults to sys.ARGV
+
+            # Initialize nested settings dictionary
+            settings: dict[str, Any] = {}
+
+            # Helper function to set nested dictionary values
+            def set_nested(dict_obj: dict[str, Any], path: str, value: Any) -> None:
+                """Set a value in a nested dictionary using dot notation path."""
+                parts = path.split(".")
+                current = dict_obj
+                for part in parts[:-1]:
+                    if part not in current:
+                        current[part] = {}
+                    current = current[part]
+                current[parts[-1]] = value
+
+            # Server host
+            if args.host is not None:
+                set_nested(settings, "server.host", args.host)
+                logger.debug(f"CLI arg: server.host set to {args.host}")
+
+            # Server port
+            if args.port is not None:
+                set_nested(settings, "server.port", args.port)
+                logger.debug(f"CLI arg: server.port set to {args.port}")
+
+            # Server startup_eosdash
+            if args.startup_eosdash is not None:
+                set_nested(settings, "server.startup_eosdash", args.startup_eosdash)
+                logger.debug(f"CLI arg: server.startup_eosdash set to {args.startup_eosdash}")
+
+            # Logging level (skip if "none" as that means don't change)
+            if args.log_level is not None and args.log_level.lower() != "none":
+                log_level = args.log_level.upper()
+                if log_level in LOGGING_LEVELS:
+                    set_nested(settings, "logging.console_level", log_level)
+                    logger.debug(f"CLI arg: logging.console_level set to {log_level}")
+                else:
+                    logger.warning(f"Invalid log level '{args.log_level}' ignored")
+
+            if args.run_as_user is not None:
+                set_nested(settings, "server.run_as_user", args.run_as_user)
+                logger.debug(f"CLI arg: server.run_as_user set to {args.run_as_user}")
+
+            if args.reload is not None:
+                set_nested(settings, "server.reload", args.reload)
+                logger.debug(f"CLI arg: server.reload set to {args.reload}")
+
+            return settings
 
         def lazy_config_file_settings() -> dict:
             """Config file settings.
@@ -574,7 +636,8 @@ class ConfigEOS(SingletonMixin, SettingsEOSDefaults):
         # The settings are all lazyly evaluated at instance creation time to allow for
         # runtime configuration.
         setting_sources = [
-            lazy_config_file_settings,  # Prio high
+            lazy_config_cli_settings,  # Prio high
+            lazy_config_file_settings,
             lazy_init_settings,
             lazy_env_settings,
             lazy_dotenv_settings,
@@ -886,6 +949,73 @@ class ConfigEOS(SingletonMixin, SettingsEOSDefaults):
 
         return config_file_path
 
+    def to_config_json(self) -> str:
+        """Serialize the configuration to a normalized JSON string.
+
+        The serialization routine ensures that the resulting JSON:
+
+        - Excludes computed fields.
+        - Excludes fields set to their default values.
+        - Excludes fields with value ``None``.
+        - Uses field aliases.
+        - Recursively removes empty dictionaries and lists.
+        - Ensures that ``general.version`` is always present and set
+            to the current application version.
+
+        Returns:
+            str: A normalized, human-readable JSON string representation
+                of the configuration.
+
+        Raises:
+            TypeError: If the serialized configuration root is not a dictionary.
+        """
+
+        def remove_empty(
+            obj: Union[dict[str, Any], list[Any], Any],
+        ) -> Union[dict[str, Any], list[Any], Any]:
+            """Recursively remove empty dictionaries, lists, and None values."""
+            if isinstance(obj, dict):
+                cleaned: dict[str, Any] = {k: remove_empty(v) for k, v in obj.items()}
+                return {k: v for k, v in cleaned.items() if v not in (None, {}, [])}
+            elif isinstance(obj, list):
+                cleaned_list: list[Any] = [remove_empty(v) for v in obj]
+                return [v for v in cleaned_list if v not in (None, {}, [])]
+            else:
+                return obj
+
+        # Use model_dump_json to respect custom Pydantic serialization
+        json_str = self.model_dump_json(
+            exclude_computed_fields=True,
+            exclude_defaults=True,
+            exclude_none=True,
+            by_alias=True,
+        )
+
+        # Load as JSON
+        root: Any = json.loads(json_str)
+
+        # Remove empty values recursively
+        cleaned_root = remove_empty(root)
+
+        # Validate that root is a dictionary
+        if not isinstance(cleaned_root, dict):
+            raise TypeError(
+                f"Configuration serialization error: root element must be a dictionary, "
+                f"got {type(cleaned_root).__name__}"
+            )
+
+        # Ensure version is present and correct
+        cleaned_root.setdefault("general", {})
+        cleaned_root["general"]["version"] = __version__
+
+        # Return pretty-printed JSON
+        return json.dumps(
+            cleaned_root,
+            indent=4,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+
     def to_config_file(self) -> None:
         """Saves the current configuration to the configuration file.
 
@@ -897,8 +1027,21 @@ class ConfigEOS(SingletonMixin, SettingsEOSDefaults):
         if not self.general.config_file_path:
             raise ValueError("Configuration file path unknown.")
         with self.general.config_file_path.open("w", encoding="utf-8", newline="\n") as f_out:
-            json_str = super().model_dump_json(indent=4)
-            f_out.write(json_str)
+            f_out.write(self.to_config_json())
+        logger.info(f"Saved configuration to '{self.general.config_file_path}'.")
+
+    def autosave(self) -> None:
+        """Saves the current configuration if AUTOMATIC save mode is configured.
+
+        Tries to avoid save operation if there are no changes between last and actual save.
+        """
+        if self.general.config_save_mode != ConfigSaveMode.AUTOMATIC:
+            return
+
+        config_str = self.to_config_json()
+        if config_str != ConfigEOS._config_autosave:
+            self.to_config_file()
+            ConfigEOS._config_autosave = config_str
 
     def update(self) -> None:
         """Updates all configuration fields.
