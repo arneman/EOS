@@ -194,3 +194,93 @@ class InverterParameters(DeviceParameters):
             "examples": [None, 0, 5000],
         },
     )
+
+
+class HybridPVInverterParameters(DeviceParameters):
+    """Hybrid PV inverter parameters for feed-in mode planning."""
+
+    peakpower_kw: float = Field(
+        gt=0,
+        json_schema_extra={
+            "description": "Nominal peak power of the PV plant [kWp].",
+            "examples": [4.875],
+        },
+    )
+    feed_in_tariff_full_kwh: float = Field(
+        ge=0,
+        json_schema_extra={
+            "description": "Feed-in tariff in FULL_FEED_IN mode [€/kWh].",
+            "examples": [0.12],
+        },
+    )
+    feed_in_tariff_excess_kwh: float = Field(
+        ge=0,
+        json_schema_extra={
+            "description": "Feed-in tariff in EXCESS mode [€/kWh].",
+            "examples": [0.082],
+        },
+    )
+    mode: str = Field(
+        default="EXCESS",
+        json_schema_extra={
+            "description": "Initial feed-in mode.",
+            "examples": ["EXCESS", "FULL_FEED_IN"],
+        },
+    )
+    max_mode_switches_per_day: int = Field(
+        default=6,
+        ge=0,
+        json_schema_extra={
+            "description": "Soft switch limit per 24h.",
+            "examples": [6],
+        },
+    )
+    min_production_threshold_w: float = Field(
+        default=10.0,
+        ge=0,
+        json_schema_extra={
+            "description": "Force EXCESS below this production threshold [W].",
+            "examples": [10.0],
+        },
+    )
+    minutes_before_sunset: int = Field(
+        default=30,
+        ge=0,
+        json_schema_extra={
+            "description": "Force EXCESS this many minutes before sunset.",
+            "examples": [30],
+        },
+    )
+    standby_loss_w: float = Field(
+        default=1.0,
+        ge=0,
+        json_schema_extra={
+            "description": "Standby losses in FULL_FEED_IN mode [W].",
+            "examples": [1.0],
+        },
+    )
+    switch_penalty_base_eur: float = Field(
+        default=0.02,
+        ge=0,
+        json_schema_extra={
+            "description": "Base penalty for soft-limit switch violations [€].",
+            "examples": [0.02],
+        },
+    )
+    switch_penalty_exp: float = Field(
+        default=1.8,
+        ge=1.0,
+        json_schema_extra={
+            "description": "Exponent for switch penalty growth.",
+            "examples": [1.8],
+        },
+    )
+    forecast_share: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        json_schema_extra={
+            "description": "Optional explicit forecast share [0..1].",
+            "examples": [0.25, None],
+        },
+    )

@@ -1,3 +1,4 @@
+import math
 from typing import Optional
 
 from loguru import logger
@@ -53,6 +54,11 @@ class Inverter:
                 scr = self.self_consumption_predictor.calculate_self_consumption(
                     consumption, generation
                 )
+                if not math.isfinite(scr):
+                    scr = 1.0
+                scr = min(max(scr, 0.0), 1.0)
+                if scr == 0.0:
+                    scr = 1.0
 
                 # Remaining power after consumption
                 remaining_power = (generation - consumption) * scr  # EVQ

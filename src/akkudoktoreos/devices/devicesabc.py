@@ -131,3 +131,21 @@ class ApplianceOperationMode(StrEnum):
     LIMIT_POWER = "LIMIT_POWER"
     FORCED_RUN = "FORCED_RUN"
     FAULT = "FAULT"
+
+
+class HybridPVFeedInMode(StrEnum):
+    """Feed-in operation modes for hybrid PV inverter switching.
+
+    Modes
+    -----
+    - EXCESS:
+        Überschusseinspeisung. PV energy can serve local load and only surplus
+        is fed into the grid.
+
+    - FULL_FEED_IN:
+        Volleinspeisung. PV energy is dedicated to feed-in and is not available
+        for local self-consumption.
+    """
+
+    EXCESS = "EXCESS"
+    FULL_FEED_IN = "FULL_FEED_IN"

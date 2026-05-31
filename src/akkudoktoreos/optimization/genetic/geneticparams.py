@@ -24,6 +24,7 @@ from akkudoktoreos.optimization.genetic.geneticabc import GeneticParametersBaseM
 from akkudoktoreos.optimization.genetic.geneticdevices import (
     ElectricVehicleParameters,
     HomeApplianceParameters,
+    HybridPVInverterParameters,
     InverterParameters,
     SolarPanelBatteryParameters,
 )
@@ -102,6 +103,13 @@ class GeneticOptimizationParameters(
     inverter: Optional[InverterParameters]
     eauto: Optional[ElectricVehicleParameters]
     dishwasher: Optional[HomeApplianceParameters] = None
+    hybrid_pv_inverters: Optional[list[HybridPVInverterParameters]] = None
+    market_stress_signal: Optional[list[float]] = Field(
+        default=None,
+        json_schema_extra={
+            "description": "An array of floats (0..1) representing market stress per interval.",
+        },
+    )
     temperature_forecast: Optional[list[Optional[float]]] = Field(
         default=None,
         json_schema_extra={
@@ -405,6 +413,70 @@ class GeneticOptimizationParameters(
                 # Retry
                 continue
 
+            def normalize_signal(values: list[float]) -> list[float]:
+                if not values:
+                    return []
+                min_val = min(values)
+                max_val = max(values)
+                denom = max_val - min_val
+                if denom <= 0:
+                    return [0.0] * len(values)
+                return [(val - min_val) / denom for val in values]
+
+            market_stress_signal: Optional[list[float]] = None
+            if (
+                cls.config.optimization.market_responsive
+                and cls.config.optimization.market_responsive.enabled
+            ):
+                spot_weight = float(
+                    cls.config.optimization.market_responsive.spot_price_weight or 0.0
+                )
+                co2_weight = float(cls.config.optimization.market_responsive.co2_weight or 0.0)
+
+                price_norm = normalize_signal(elecprice_marketprice_wh)
+                co2_norm = [0.0] * len(price_norm)
+
+                co2_key = cls.config.optimization.market_responsive.co2_prediction_key
+                if co2_weight > 0.0 and co2_key:
+                    try:
+                        co2_series = cls.prediction.key_to_array(
+                            key=co2_key,
+                            start_datetime=parameter_start_datetime,
+                            end_datetime=parameter_end_datetime,
+                            interval=interval,
+                            fill_method="ffill",
+                        ).tolist()
+                    except Exception:
+                        logger.info(
+                            "No CO2 forecast data available for key '%s' - using zero signal.",
+                            co2_key,
+                        )
+                        co2_series = []
+
+                    if len(co2_series) < len(price_norm):
+                        fill_value = co2_series[-1] if co2_series else 0.0
+                        co2_series = co2_series + [fill_value] * (len(price_norm) - len(co2_series))
+                    else:
+                        co2_series = co2_series[: len(price_norm)]
+
+                    co2_norm = normalize_signal(co2_series)
+
+                weight_sum = spot_weight + co2_weight
+                if weight_sum <= 0.0:
+                    market_stress_signal = [0.0] * len(price_norm)
+                else:
+                    market_stress_signal = [
+                        min(
+                            1.0,
+                            max(
+                                0.0,
+                                (spot_weight * price_norm[idx] + co2_weight * co2_norm[idx])
+                                / weight_sum,
+                            ),
+                        )
+                        for idx in range(len(price_norm))
+                    ]
+
             # Add device data
 
             # Batteries
@@ -640,6 +712,39 @@ class GeneticOptimizationParameters(
                     # Retry
                     continue
 
+            # Hybrid PV Inverters
+            # ------------------
+            hybrid_pv_inverter_params: list[HybridPVInverterParameters] = []
+            if cls.config.devices.max_hybrid_pv_inverters is None:
+                cls.config.devices.max_hybrid_pv_inverters = 0
+
+            if cls.config.devices.max_hybrid_pv_inverters > 0:
+                if cls.config.devices.hybrid_pv_inverters is None:
+                    logger.info(
+                        "No hybrid PV inverter data available, but max_hybrid_pv_inverters > 0. Falling back to empty list."
+                    )
+                    cls.config.devices.hybrid_pv_inverters = []
+
+                for hybrid_config in cls.config.devices.hybrid_pv_inverters[
+                    : cls.config.devices.max_hybrid_pv_inverters
+                ]:
+                    hybrid_pv_inverter_params.append(
+                        HybridPVInverterParameters(
+                            device_id=hybrid_config.device_id,
+                            peakpower_kw=hybrid_config.peakpower_kw,
+                            feed_in_tariff_full_kwh=hybrid_config.feed_in_tariff_full_kwh,
+                            feed_in_tariff_excess_kwh=hybrid_config.feed_in_tariff_excess_kwh,
+                            mode=hybrid_config.mode,
+                            max_mode_switches_per_day=hybrid_config.max_mode_switches_per_day,
+                            min_production_threshold_w=hybrid_config.min_production_threshold_w,
+                            minutes_before_sunset=hybrid_config.minutes_before_sunset,
+                            standby_loss_w=hybrid_config.standby_loss_w,
+                            switch_penalty_base_eur=hybrid_config.switch_penalty_base_eur,
+                            switch_penalty_exp=hybrid_config.switch_penalty_exp,
+                            forecast_share=hybrid_config.forecast_share,
+                        )
+                    )
+
             # We got all parameter data
             try:
                 oparams = GeneticOptimizationParameters(
@@ -655,6 +760,8 @@ class GeneticOptimizationParameters(
                     eauto=electric_vehicle_params,
                     inverter=inverter_params,
                     dishwasher=home_appliance_params,
+                    hybrid_pv_inverters=hybrid_pv_inverter_params or None,
+                    market_stress_signal=market_stress_signal,
                     start_solution=start_solution,
                 )
             except:
