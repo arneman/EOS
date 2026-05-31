@@ -479,12 +479,12 @@ def poll_eos_solution():
                 continue
 
             # Find current hour's row (closest timestamp <= now)
-            now_str = datetime.now().astimezone().isoformat(timespec="seconds")
+            now_dt = datetime.now().astimezone()
             sorted_timestamps = sorted(sol.keys())
 
             current_ts = None
             for ts in sorted_timestamps:
-                if ts <= now_str:
+                if datetime.fromisoformat(ts) <= now_dt:
                     current_ts = ts
                 else:
                     break
