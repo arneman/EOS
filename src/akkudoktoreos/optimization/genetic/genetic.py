@@ -1170,7 +1170,12 @@ class GeneticOptimization(OptimizationBase):
                 member["verluste"].append(extra_value2)
                 member["nebenbedingung"].append(extra_value3)
 
-        return hof[0], member
+        # Convert best individual to plain list to break DEAP cyclic references
+        # (Individual → FitnessMin → Individual), then free the population.
+        best = list(hof[0])
+        del population, pop, hof, log
+
+        return best, member
 
     def optimierung_ems(
         self,

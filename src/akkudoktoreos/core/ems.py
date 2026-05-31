@@ -259,10 +259,14 @@ class EnergyManagement(
         if cls._start_datetime is None:  # Make mypy happy - already set by us
             raise RuntimeError("Start datetime not set.")
 
-        # Disable automatic GC during optimization to prevent costly gen-2 collections
-        # while hundreds of thousands of DEAP Individual/FitnessMin cyclic objects exist.
-        gc_was_enabled = gc.isenabled()
-        gc.disable()
+        # GC strategy for DEAP optimization on memory-constrained systems:
+        # 1. Collect garbage before optimization to start with minimal memory footprint
+        # 2. Suppress expensive gen-2 collections during optimization (gen-0/gen-1 still run)
+        # 3. After optimization, restore thresholds and collect freed DEAP objects
+        gc.collect()
+        original_thresholds = gc.get_threshold()
+        # Allow gen-0/gen-1 (fast, short-lived objects) but prevent gen-2 (full sweep)
+        gc.set_threshold(original_thresholds[0], original_thresholds[1], 999_999_999)
         try:
             optimization = GeneticOptimization(
                 verbose=bool(cls.config.server.verbose),
@@ -278,9 +282,9 @@ class EnergyManagement(
             cls._stage = EnergyManagementStage.IDLE
             return
         finally:
-            # Re-enable GC and force collection of DEAP cyclic references.
-            if gc_was_enabled:
-                gc.enable()
+            # Restore original GC thresholds and collect DEAP cyclic references.
+            gc.set_threshold(*original_thresholds)
+            del optimization
             gc.collect()
 
         cls._stage = EnergyManagementStage.CONTROL_DISPATCH
