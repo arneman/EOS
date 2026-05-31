@@ -424,19 +424,20 @@ class GeneticOptimizationParameters(
                 return [(val - min_val) / denom for val in values]
 
             market_stress_signal: Optional[list[float]] = None
+            _market_responsive = getattr(cls.config.optimization, "market_responsive", None)
             if (
-                cls.config.optimization.market_responsive
-                and cls.config.optimization.market_responsive.enabled
+                _market_responsive
+                and _market_responsive.enabled
             ):
                 spot_weight = float(
-                    cls.config.optimization.market_responsive.spot_price_weight or 0.0
+                    _market_responsive.spot_price_weight or 0.0
                 )
-                co2_weight = float(cls.config.optimization.market_responsive.co2_weight or 0.0)
+                co2_weight = float(_market_responsive.co2_weight or 0.0)
 
                 price_norm = normalize_signal(elecprice_marketprice_wh)
                 co2_norm = [0.0] * len(price_norm)
 
-                co2_key = cls.config.optimization.market_responsive.co2_prediction_key
+                co2_key = _market_responsive.co2_prediction_key
                 if co2_weight > 0.0 and co2_key:
                     try:
                         co2_series = cls.prediction.key_to_array(
