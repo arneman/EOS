@@ -499,19 +499,16 @@ def poll_eos_solution():
             charge_allowed = 1 if mode in CHARGING_MODES else 0
             discharge_allowed = 1 if mode in DISCHARGING_MODES else 0
 
-            # Extract EV operation mode separately
-            ev_mode, ev_factor = get_active_mode(row, "BMW_i5")
-            ev_charge_allowed = 1 if ev_mode in CHARGING_MODES else 0
-
             # Battery charge power from genetic_ac_charge_factor (direct, no SOC delta)
             if mode in CHARGING_MODES:
                 battery_power_w = int(row.get("genetic_ac_charge_factor", 0.0) * REAL_BATTERY_MAX_CHARGE_W)
             else:
                 battery_power_w = 0
 
-            # EV charge power from genetic_ev_charge_factor
-            if ev_plugged:
-                ev_power_w = int(row.get("genetic_ev_charge_factor", 0.0) * ev_max_charge_w)
+            # EOS doesn't plan EV separately (virtual battery strategy) — mirror battery
+            ev_charge_allowed = charge_allowed
+            if ev_plugged and charge_allowed:
+                ev_power_w = min(battery_power_w, int(ev_max_charge_w))
             else:
                 ev_power_w = 0
 
