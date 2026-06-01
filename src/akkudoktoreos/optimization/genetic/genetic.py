@@ -924,26 +924,13 @@ class GeneticOptimization(OptimizationBase):
                             battery_soc_at_sunset = float(soc_arr[soc_index])
                             target_soc = float(parameters.pv_akku.max_soc_percentage)
                             if battery_soc_at_sunset < target_soc:
-                                # Check if enough excess PV exists to fill the gap
-                                bat = self.simulation.battery
-                                soc_gap_pct = target_soc - bat.initial_soc_percentage
-                                energy_needed_wh = (
-                                    (soc_gap_pct / 100.0)
-                                    * bat.capacity_wh
-                                    / bat.charging_efficiency
-                                )
-                                # Sum excess PV (after load) from start to sunset
-                                excess_pv_wh = 0.0
-                                for h in range(start_hour, last_pv_hour + 1):
-                                    excess = pv_arr[h] - load_arr[h]
-                                    if excess > 0:
-                                        excess_pv_wh += excess
-
-                                # Only penalise if PV alone could have filled the battery
-                                if excess_pv_wh >= energy_needed_wh:
-                                    gesamtbilanz += (
-                                        target_soc - battery_soc_at_sunset
-                                    ) * battery_target_penalty
+                                # Penalise whenever battery is below target at sunset.
+                                # The ac_charge_break_even penalty already prevents
+                                # economically unjustified grid charging, so no additional
+                                # feasibility guard is needed here.
+                                gesamtbilanz += (
+                                    target_soc - battery_soc_at_sunset
+                                ) * battery_target_penalty
 
         # --- AC charging break-even penalty ---
         # Penalise AC charging decisions that cannot be economically justified given the
