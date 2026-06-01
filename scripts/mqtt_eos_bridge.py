@@ -494,36 +494,36 @@ def poll_eos_solution():
 
             row = sol[current_ts]
 
-            # Extract battery operation mode
-            mode, factor = get_active_mode(row, "battery1")
+            # Extract battery operation mode (device ID prefix, not "battery1")
+            mode, factor = get_active_mode(row, "LiFePO4_Cluster")
             charge_allowed = 1 if mode in CHARGING_MODES else 0
             discharge_allowed = 1 if mode in DISCHARGING_MODES else 0
 
-            # Calculate charge power from planned SOC delta (current→next hour)
-            current_soc = row.get("battery1_soc_factor", 0.0)
+            # Extract EV operation mode separately
+            ev_mode, ev_factor = get_active_mode(row, "BMW_i5")
+            ev_charge_allowed = 1 if ev_mode in CHARGING_MODES else 0
+
+            # Battery charge power from genetic_ac_charge_factor (direct, no SOC delta)
+            if mode in CHARGING_MODES:
+                battery_power_w = int(row.get("genetic_ac_charge_factor", 0.0) * REAL_BATTERY_MAX_CHARGE_W)
+            else:
+                battery_power_w = 0
+
+            # EV charge power from genetic_ev_charge_factor
+            if ev_plugged:
+                ev_power_w = int(row.get("genetic_ev_charge_factor", 0.0) * ev_max_charge_w)
+            else:
+                ev_power_w = 0
+
+            # Planned total for logging (battery SOC delta * real capacity)
+            current_soc = row.get("LiFePO4_Cluster_soc_factor", 0.0)
             current_idx = sorted_timestamps.index(current_ts)
             if current_idx + 1 < len(sorted_timestamps):
                 next_ts = sorted_timestamps[current_idx + 1]
-                next_soc = sol[next_ts].get("battery1_soc_factor", current_soc)
+                next_soc = sol[next_ts].get("LiFePO4_Cluster_soc_factor", current_soc)
             else:
                 next_soc = current_soc
-
-            soc_delta = next_soc - current_soc
-            # Positive delta = charging, negative = discharging
-            # Energy = soc_delta * virtual_capacity; power = energy / 1h = energy in W
-            planned_total_power_w = soc_delta * eos_current_capacity_wh
-
-            if mode in CHARGING_MODES and planned_total_power_w > 0:
-                # Split between real battery and EV based on capacity ratio
-                battery_fraction = REAL_BATTERY_CAPACITY_WH / eos_current_capacity_wh
-                battery_power_w = int(min(planned_total_power_w * battery_fraction, REAL_BATTERY_MAX_CHARGE_W))
-                if ev_plugged and ev_deficit_wh > 0:
-                    ev_power_w = int(min(planned_total_power_w * (1 - battery_fraction), ev_max_charge_w))
-                else:
-                    ev_power_w = 0
-            else:
-                battery_power_w = 0
-                ev_power_w = 0
+            planned_total_power_w = (next_soc - current_soc) * REAL_BATTERY_CAPACITY_WH
 
             # Publish current state (retained)
             mqtt_client.publish(MQTT_PUB_BATTERY_MODE, mode, retain=True)
@@ -531,7 +531,7 @@ def poll_eos_solution():
             mqtt_client.publish(MQTT_PUB_BATTERY_CHARGE, str(charge_allowed), retain=True)
             mqtt_client.publish(MQTT_PUB_BATTERY_DISCHARGE, str(discharge_allowed), retain=True)
             mqtt_client.publish(MQTT_PUB_BATTERY_POWER, str(battery_power_w), retain=True)
-            mqtt_client.publish(MQTT_PUB_EV_CHARGE, str(charge_allowed), retain=True)
+            mqtt_client.publish(MQTT_PUB_EV_CHARGE, str(ev_charge_allowed), retain=True)
             mqtt_client.publish(MQTT_PUB_EV_POWER, str(ev_power_w), retain=True)
 
             # Build schedule (all hours from now onward)
@@ -540,20 +540,20 @@ def poll_eos_solution():
                 if ts < current_ts:
                     continue
                 r = sol[ts]
-                m, f = get_active_mode(r, "battery1")
-                # Compute planned power from SOC delta to next hour
-                ts_soc = r.get("battery1_soc_factor", 0.0)
-                if i + 1 < len(sorted_timestamps):
-                    next_soc_s = sol[sorted_timestamps[i + 1]].get("battery1_soc_factor", ts_soc)
+                m, f = get_active_mode(r, "LiFePO4_Cluster")
+                # Compute planned battery power from genetic_ac_charge_factor
+                if m in CHARGING_MODES:
+                    power_w = int(r.get("genetic_ac_charge_factor", 0.0) * REAL_BATTERY_MAX_CHARGE_W)
+                elif m in DISCHARGING_MODES:
+                    power_w = -int(r.get("genetic_discharge_allowed_factor", 0.0) * REAL_BATTERY_MAX_CHARGE_W)
                 else:
-                    next_soc_s = ts_soc
-                power_w = int((next_soc_s - ts_soc) * eos_current_capacity_wh)
+                    power_w = 0
                 schedule.append({
                     "time": ts,
                     "mode": m,
                     "factor": round(f, 2),
                     "charge": 1 if m in CHARGING_MODES else 0,
-                    "soc": round(r.get("battery1_soc_factor", 0.0), 3),
+                    "soc": round(r.get("LiFePO4_Cluster_soc_factor", 0.0), 3),
                     "power_w": power_w,
                 })
             mqtt_client.publish(MQTT_PUB_SCHEDULE, json.dumps(schedule), retain=True)
