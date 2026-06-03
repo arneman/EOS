@@ -496,6 +496,8 @@ def _make_mock_simulation(
     ac_charge_hours: list | None = None,
     elect_price_hourly: list | None = None,
     load_energy_array: list | None = None,
+    pv_prediction_wh: list | None = None,
+    elect_revenue_per_hour_arr: list | None = None,
 ):
     """Return a mock GeneticSimulation with configurable properties for penalty tests."""
     n = 24
@@ -505,6 +507,10 @@ def _make_mock_simulation(
         elect_price_hourly = [0.0003] * n        # 30 ct/kWh flat
     if load_energy_array is None:
         load_energy_array = [1000.0] * n          # 1 kWh constant load
+    if pv_prediction_wh is None:
+        pv_prediction_wh = [0.0] * n
+    if elect_revenue_per_hour_arr is None:
+        elect_revenue_per_hour_arr = [0.00008] * n
 
     inv = SimpleNamespace(
         ac_to_dc_efficiency=ac_to_dc_efficiency,
@@ -527,6 +533,8 @@ def _make_mock_simulation(
     sim.ac_charge_hours = np.array(ac_charge_hours, dtype=float)
     sim.elect_price_hourly = np.array(elect_price_hourly, dtype=float)
     sim.load_energy_array = np.array(load_energy_array, dtype=float)
+    sim.pv_prediction_wh = np.array(pv_prediction_wh, dtype=float)
+    sim.elect_revenue_per_hour_arr = np.array(elect_revenue_per_hour_arr, dtype=float)
     return sim
 
 
@@ -676,6 +684,53 @@ class TestAcChargeBreakEvenPenalty:
         fitness = _run_evaluate_with_mocked_sim(config_eos, sim, base_gesamtbilanz=base)
         # Fitness must be worse (higher) than base
         assert fitness > base + 1e-6
+
+    def test_future_pv_surplus_lowers_ac_charge_value(self, config_eos):
+        """Future PV surplus should discourage night AC grid charging."""
+        n = 24
+        # Charge cheaply now, expensive future grid prices would normally justify AC charge.
+        prices = [0.0002] + [0.0004] * (n - 1)
+        ac_charge = [1.0] + [0.0] * (n - 1)
+        loads = [1000.0] * n
+        feed_in = [0.0001] * n
+
+        # Case A: no future PV surplus -> baseline break-even path (no penalty expected).
+        sim_without_surplus = _make_mock_simulation(
+            ac_to_dc_efficiency=0.93,
+            dc_to_ac_efficiency=0.95,
+            charging_efficiency=0.95,
+            discharging_efficiency=0.95,
+            ac_charge_hours=list(ac_charge),
+            elect_price_hourly=list(prices),
+            load_energy_array=list(loads),
+            pv_prediction_wh=[0.0] * n,
+            elect_revenue_per_hour_arr=list(feed_in),
+            initial_soc_percentage=0.0,
+        )
+
+        # Case B: strong future PV surplus -> AC charge should become uneconomic.
+        sim_with_surplus = _make_mock_simulation(
+            ac_to_dc_efficiency=0.93,
+            dc_to_ac_efficiency=0.95,
+            charging_efficiency=0.95,
+            discharging_efficiency=0.95,
+            ac_charge_hours=list(ac_charge),
+            elect_price_hourly=list(prices),
+            load_energy_array=list(loads),
+            pv_prediction_wh=[0.0] + [4000.0] * (n - 1),
+            elect_revenue_per_hour_arr=list(feed_in),
+            initial_soc_percentage=0.0,
+        )
+
+        fitness_without_surplus = _run_evaluate_with_mocked_sim(
+            config_eos, sim_without_surplus, base_gesamtbilanz=0.0
+        )
+        fitness_with_surplus = _run_evaluate_with_mocked_sim(
+            config_eos, sim_with_surplus, base_gesamtbilanz=0.0
+        )
+
+        assert fitness_without_surplus == pytest.approx(0.0, abs=1e-9)
+        assert fitness_with_surplus > 1e-6
 
     # -----------------------------------------------------------------
     # 5d. Free PV energy covers expensive hours → penalty reduced/eliminated

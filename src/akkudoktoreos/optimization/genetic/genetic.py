@@ -967,6 +967,8 @@ class GeneticOptimization(OptimizationBase):
                 ac_charge_arr = self.simulation.ac_charge_hours
                 prices_arr = self.simulation.elect_price_hourly
                 load_arr = self.simulation.load_energy_array
+                feed_in_arr = self.simulation.elect_revenue_per_hour_arr
+                pv_arr = self.simulation.pv_prediction_wh
                 n = len(prices_arr)
 
                 # Usable AC energy already in battery from prior PV charging (zero grid cost).
@@ -1013,25 +1015,75 @@ class GeneticOptimization(OptimizationBase):
                     # Price that a future discharge hour must reach to break even
                     break_even_price = charge_price / round_trip_eff
 
+                    # Requested AC energy drawn from grid for this charging decision.
+                    dc_wh = bat.max_charge_power_w * ac_factor
+                    ac_wh = dc_wh / max(inv.ac_to_dc_efficiency, 1e-9)
+                    delivered_wh = ac_wh * round_trip_eff
+
                     # Consume free PV energy against the highest-price FUTURE hours.
                     # Only consider hours strictly after the current charging hour.
                     remaining_free = free_ac_wh
                     best_uncovered_price = 0.0
+                    remaining_net_wh = 0.0
+                    remaining_net_value = 0.0
                     for fp, fl, fh in indexed_future:
                         if fh <= hour:
                             continue  # skip hours not in the future
                         if remaining_free >= fl:
                             remaining_free -= fl
                         else:
-                            best_uncovered_price = fp
-                            break
+                            uncovered_wh = fl - remaining_free
+                            remaining_free = 0.0
+                            if best_uncovered_price == 0.0:
+                                best_uncovered_price = fp
+                            remaining_net_wh += uncovered_wh
+                            remaining_net_value += uncovered_wh * fp
+                    future_value_price = best_uncovered_price
 
-                    if best_uncovered_price < break_even_price:
+                    # If future PV surplus exists, value AC charging against a weighted
+                    # replacement mix:
+                    # - surplus PV (opportunity cost = feed-in tariff), then
+                    # - residual net load (value = future grid price).
+                    # This avoids selecting night grid charging when daytime surplus PV
+                    # could have filled the same battery headroom at lower opportunity cost.
+                    if pv_arr is not None and feed_in_arr is not None and delivered_wh > 0.0:
+                        pv_surplus_wh = 0.0
+                        pv_surplus_value = 0.0
+                        for fh in range(hour + 1, horizon_end):
+                            pv_surplus = max(0.0, float(pv_arr[fh]) - float(load_arr[fh]))
+                            if pv_surplus <= 0.0:
+                                continue
+                            pv_surplus_wh += pv_surplus
+                            pv_surplus_value += pv_surplus * float(feed_in_arr[fh])
+
+                        if pv_surplus_wh > 0.0:
+                            avg_feed_in_price = pv_surplus_value / pv_surplus_wh
+                            avg_grid_price = (
+                                remaining_net_value / remaining_net_wh
+                                if remaining_net_wh > 0.0
+                                else 0.0
+                            )
+
+                            pv_part_wh = min(delivered_wh, pv_surplus_wh)
+                            residual_wh = max(0.0, delivered_wh - pv_part_wh)
+                            grid_part_wh = min(residual_wh, remaining_net_wh)
+                            valued_wh = pv_part_wh + grid_part_wh
+
+                            weighted_future_price = 0.0
+                            if valued_wh > 0.0:
+                                weighted_future_price = (
+                                    pv_part_wh * avg_feed_in_price + grid_part_wh * avg_grid_price
+                                ) / valued_wh
+
+                            if future_value_price > 0.0:
+                                future_value_price = min(future_value_price, weighted_future_price)
+                            else:
+                                future_value_price = weighted_future_price
+
+                    if future_value_price < break_even_price:
                         # AC charging at this hour is economically unjustified.
-                        # Penalty = excess cost per Wh × DC energy requested this hour.
-                        dc_wh = bat.max_charge_power_w * ac_factor
-                        ac_wh = dc_wh / max(inv.ac_to_dc_efficiency, 1e-9)
-                        excess_cost_per_wh = break_even_price - best_uncovered_price
+                        # Penalty = excess cost per Wh × AC energy requested this hour.
+                        excess_cost_per_wh = break_even_price - future_value_price
                         gesamtbilanz += ac_wh * excess_cost_per_wh * ac_penalty_factor
 
         # --- DC charging feed-in opportunity-cost penalty ---
