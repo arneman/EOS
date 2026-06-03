@@ -150,38 +150,6 @@ class EnergyManagement(
         return cls._genetic_solution
 
     @classmethod
-    def _debug_solution_summary(cls) -> dict:
-        """Return a compact summary for debug logs.
-
-        Avoid logging full optimization objects because they can become very large
-        and cause excessive logging overhead on long-running systems.
-        """
-        optimization_solution = cls._optimization_solution
-        plan = cls._plan
-        summary: dict = {
-            "start_datetime": str(cls._start_datetime) if cls._start_datetime else None,
-            "last_run_datetime": (str(cls._last_run_datetime) if cls._last_run_datetime else None),
-            "optimization_id": getattr(optimization_solution, "id", None),
-            "optimization_rows": 0,
-            "plan_rows": 0,
-            "plan_first_timestamp": None,
-            "plan_last_timestamp": None,
-        }
-
-        optimization_data = getattr(optimization_solution, "data", None)
-        if isinstance(optimization_data, dict):
-            summary["optimization_rows"] = len(optimization_data)
-
-        plan_data = getattr(plan, "data", None)
-        if isinstance(plan_data, dict) and plan_data:
-            sorted_timestamps = sorted(plan_data.keys())
-            summary["plan_rows"] = len(sorted_timestamps)
-            summary["plan_first_timestamp"] = sorted_timestamps[0]
-            summary["plan_last_timestamp"] = sorted_timestamps[-1]
-
-        return summary
-
-    @classmethod
     def _run(
         cls,
         start_datetime: DateTime,
@@ -324,7 +292,9 @@ class EnergyManagement(
         # Make plan public
         cls._plan = solution.energy_management_plan()
 
-        logger.debug("Energy management optimization summary: {}", cls._debug_solution_summary())
+        logger.debug("Energy management genetic solution:\n{}", cls._genetic_solution)
+        logger.debug("Energy management optimization solution:\n{}", cls._optimization_solution)
+        logger.debug("Energy management plan:\n{}", cls._plan)
         logger.info("Energy management run done (optimization updated)")
 
         # Do control dispatch by adapters
@@ -427,4 +397,4 @@ class EnergyManagement(
                     "Energy management run timed out after {}s — skipping this run.",
                     int(timeout_sec),
                 )
-                EnergyManagement._stage = EnergyManagementStage.IDLE
+                cls._stage = EnergyManagementStage.IDLE

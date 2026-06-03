@@ -1251,16 +1251,13 @@ class DataSequence(DataABC, DatabaseRecordProtocolMixin[DataRecord]):
             elif fill_method == "bfill":
                 resampled = resampled.bfill()
 
-        if len(resampled) > 0:
-            logger.debug(
-                "Resampled for '{}' with length {} (first='{}', last='{}')",
-                key,
-                len(resampled),
-                resampled.index[0],
-                resampled.index[-1],
-            )
-        else:
-            logger.debug("Resampled for '{}' with length 0", key)
+        logger.debug(
+            "Resampled for '{}' with length {}: {}...{}",
+            key,
+            len(resampled),
+            resampled[:10],
+            resampled[-10:],
+        )
 
         # Convert the resampled series to a NumPy array
         if start_datetime is not None and len(resampled) > 0:
@@ -1278,16 +1275,9 @@ class DataSequence(DataABC, DatabaseRecordProtocolMixin[DataRecord]):
             array = array.astype(object)
             array[pd.isna(array)] = None
 
-        if len(array) > 0:
-            logger.debug(
-                "Array for '{}' with length {} (first={}, last={})",
-                key,
-                len(array),
-                array[0],
-                array[-1],
-            )
-        else:
-            logger.debug("Array for '{}' with length 0", key)
+        logger.debug(
+            "Array for '{}' with length {}: {}...{}", key, len(array), array[:10], array[-10:]
+        )
 
         return array
 
