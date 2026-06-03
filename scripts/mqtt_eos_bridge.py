@@ -8,6 +8,9 @@ Connects to MQTT broker and forwards device measurements to EOS REST API.
 MQTT Topics:
 - devices/bmw_i5/cardata/drivetrain/batteryManagement/header → BMW_i5-soc-factor
 - devices/victron_battery/battery_soc → LiFePO4_Cluster-soc-factor (combined virtual SOC)
+- devices/powermeter/kwh → grid_import_emr (optional, cumulative grid import meter)
+- devices/powermeter/kwh_einspeisung + devices/powermeter_einspeisung/kwh_einspeisung
+    → summed grid_export_emr (optional, cumulative export meter)
 - devices/bmw_i5//battery_missing_until_max_soc_wh → virtual battery capacity update
 
 Virtual Battery Strategy:
@@ -59,7 +62,7 @@ DEFAULT_LOG_LEVEL = "INFO"
 
 EOS_MEASUREMENT_PATH = "/v1/measurement/value"
 EOS_CONFIG_PATH = "/v1/config/devices/batteries/0"
-EOS_HEALTH_PATH = "/docs"
+EOS_HEALTH_PATH = "/v1/health"
 
 EOS_PUT_TIMEOUT_S = 5
 EOS_HEALTH_TIMEOUT_S = 5
@@ -82,6 +85,9 @@ MQTT_PUB_SCHEDULE = f"{MQTT_PUB_PREFIX}/schedule"
 # MQTT Topics
 TOPIC_BMW_SOC = "devices/bmw_i5/cardata/drivetrain/batteryManagement/header"
 TOPIC_BATTERY_SOC = "devices/victron_battery/battery_soc"
+TOPIC_POWERMETER_KWH = "devices/powermeter/kwh"
+TOPIC_GRID_EXPORT_KWH_1 = "devices/powermeter/kwh_einspeisung"
+TOPIC_GRID_EXPORT_KWH_2 = "devices/powermeter_einspeisung/kwh_einspeisung"
 TOPIC_EV_DEFICIT = "devices/bmw_i5/battery_missing_until_max_soc_wh"
 TOPIC_EV_PLUGGED = "devices/bmw_i5/is_plugged"
 TOPIC_EV_MAX_POWER = "devices/bmw_i5/max_power"
@@ -89,10 +95,14 @@ TOPIC_EV_MAX_POWER = "devices/bmw_i5/max_power"
 # EOS measurement keys
 BMW_SOC_EOS_KEY = "BMW_i5-soc-factor"
 BATTERY_SOC_EOS_KEY = "LiFePO4_Cluster-soc-factor"
+GRID_IMPORT_EMR_EOS_KEY = "grid_import_emr"
+GRID_EXPORT_EMR_EOS_KEY = "grid_export_emr"
 
 # Descriptions
 BMW_SOC_DESCRIPTION = "BMW i5 State of Charge"
 BATTERY_SOC_DESCRIPTION = "Battery State of Charge"
+GRID_IMPORT_EMR_DESCRIPTION = "Grid Import Energy Meter Reading"
+GRID_EXPORT_EMR_DESCRIPTION = "Grid Export Energy Meter Reading"
 
 # Real battery hardware constants
 REAL_BATTERY_CAPACITY_WH = 30412
@@ -119,6 +129,14 @@ EOS_URL = os.getenv("EOS_URL", DEFAULT_EOS_URL)
 EOS_MEASUREMENT_ENDPOINT = f"{EOS_URL}{EOS_MEASUREMENT_PATH}"
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", DEFAULT_LOG_LEVEL)
+EOS_REFRESH_INTERVAL_S = int(os.getenv("EOS_REFRESH_INTERVAL_S", "0"))
+LOAD_EMR_MIN_DELTA_KWH = float(os.getenv("LOAD_EMR_MIN_DELTA_KWH", "0.01"))
+ENABLE_PERIODIC_RESEND = os.getenv("ENABLE_PERIODIC_RESEND", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # =============================================================================
 # MQTT Topic to EOS Measurement Key Mapping
@@ -134,10 +152,28 @@ TOPIC_MAPPING = {
         "eos_key": BATTERY_SOC_EOS_KEY,
         "converter": lambda x: float(x) / SOC_SCALE_FACTOR,  # MQTT sends 0-100%
         "description": BATTERY_SOC_DESCRIPTION,
+        "formatter": lambda v: f"{v:.1%}",
+    },
+    TOPIC_POWERMETER_KWH: {
+        "eos_key": GRID_IMPORT_EMR_EOS_KEY,
+        "converter": lambda x: float(x),
+        "description": GRID_IMPORT_EMR_DESCRIPTION,
+        "formatter": lambda v: f"{v:.3f} kWh",
+        # Grid import can be very low (PV+battery homes), so keep a small delta.
+        "min_delta": LOAD_EMR_MIN_DELTA_KWH,
     },
 }
 
-MQTT_TOPICS = sorted(set(TOPIC_MAPPING.keys()) | {TOPIC_EV_DEFICIT, TOPIC_EV_PLUGGED, TOPIC_EV_MAX_POWER})
+MQTT_TOPICS = sorted(
+    set(TOPIC_MAPPING.keys())
+    | {
+        TOPIC_GRID_EXPORT_KWH_1,
+        TOPIC_GRID_EXPORT_KWH_2,
+        TOPIC_EV_DEFICIT,
+        TOPIC_EV_PLUGGED,
+        TOPIC_EV_MAX_POWER,
+    }
+)
 
 # =============================================================================
 # Global State
@@ -154,12 +190,17 @@ ev_max_charge_w: float = EV_MAX_CHARGE_W_DEFAULT  # EV max charge power from MQT
 battery_soc_factor: Optional[float] = None  # Last known real battery SOC (0.0-1.0)
 eos_current_capacity_wh: float = REAL_BATTERY_CAPACITY_WH  # Currently configured in EOS
 eos_current_max_charge_w: float = REAL_BATTERY_MAX_CHARGE_W  # Currently configured in EOS
+grid_export_meter_values: Dict[str, Optional[float]] = {
+    TOPIC_GRID_EXPORT_KWH_1: None,
+    TOPIC_GRID_EXPORT_KWH_2: None,
+}
 
 # Flag to control background threads
 repeat_thread_running = False
 repeat_thread: Optional[threading.Thread] = None
 solution_thread: Optional[threading.Thread] = None
 mqtt_client: Optional[mqtt.Client] = None  # Set in main() for publishing
+eos_recovery_mode: bool = False  # True after EOS write failures until health/replay succeeds
 
 
 # =============================================================================
@@ -174,12 +215,13 @@ def send_measurement_to_eos(
     force: bool = False,
     source: str = "",
     value_formatted: Optional[str] = None,
+    min_delta: float = 0.0,
 ) -> bool:
     """Send measurement value to EOS via REST API with unified deduplication.
     
     Sends if:
-    - Value changed from last sent value, OR
-    - 60 seconds have passed since last send, OR
+    - Value changed from last sent value by at least min_delta, OR
+    - EOS_REFRESH_INTERVAL_S seconds have passed since last send (if > 0), OR
     - force=True (bypass all checks)
     
     Args:
@@ -190,9 +232,13 @@ def send_measurement_to_eos(
         source: Optional source prefix for logging (e.g., "mqtt", "repeat")
         value_formatted: Optional pre-formatted value string for logging (e.g., "85.0%", "2500W")
     
+        min_delta: Minimum absolute change required before sending an updated value.
+
     Returns:
         True if successful or skipped, False on HTTP error
     """
+    global eos_recovery_mode
+
     now_ts = time.time()
     now = datetime.now().astimezone().isoformat(timespec='seconds')
     
@@ -209,14 +255,22 @@ def send_measurement_to_eos(
         if last_value is None:
             # First time sending this key
             should_send = True
-        elif last_value != value:
-            # Value changed
-            logger.debug(f"Value changed: {key}: {last_value} → {value}")
-            should_send = True
-        elif time_since_last_send >= EOS_SEND_INTERVAL_S:
-            # 60 seconds passed
-            should_send = True
         else:
+            delta = abs(last_value - value)
+            if min_delta > 0:
+                if delta >= min_delta:
+                    logger.debug(f"Value changed: {key}: {last_value} → {value}")
+                    should_send = True
+            elif last_value != value:
+                # Backward-compatible behaviour for keys without threshold.
+                logger.debug(f"Value changed: {key}: {last_value} → {value}")
+                should_send = True
+
+        if not should_send and EOS_REFRESH_INTERVAL_S > 0 and time_since_last_send >= EOS_REFRESH_INTERVAL_S:
+            # Optional safety refresh interval
+            should_send = True
+
+        if not should_send:
             skip_reason = f"unchanged, {time_since_last_send:.0f}s since last send"
     
     if not should_send:
@@ -234,6 +288,7 @@ def send_measurement_to_eos(
         # Update tracking on success
         eos_last_values[key] = value
         eos_last_timestamps[key] = now_ts
+        eos_recovery_mode = False
         
         # Unified logging with optional source prefix
         log_prefix = f"({source})" if source else ""
@@ -244,45 +299,65 @@ def send_measurement_to_eos(
         return True
     except requests.exceptions.RequestException as e:
         logger.error(f"✗ Failed to send {key}={value} to EOS: {e}")
+        eos_recovery_mode = True
         return False
 
 
+def check_eos_reachable() -> bool:
+    """Check whether EOS API is reachable and healthy."""
+    try:
+        response = requests.get(f"{EOS_URL}{EOS_HEALTH_PATH}", timeout=EOS_HEALTH_TIMEOUT_S)
+        response.raise_for_status()
+        return True
+    except requests.exceptions.RequestException:
+        return False
+
+
+def replay_cached_measurements(source: str = "recovery") -> None:
+    """Replay latest cached values once (used after EOS recovery)."""
+    if not eos_last_values:
+        return
+    logger.info(f"Replaying {len(eos_last_values)} cached EOS measurement(s) ({source})...")
+    for key, value in list(eos_last_values.items()):
+        if value is None:
+            continue
+        send_measurement_to_eos(
+            key=key,
+            value=value,
+            description=f"Replay {key}",
+            force=True,
+            source=source,
+        )
+
+
 def repeat_all_values():
-    """Background thread that resends all cached values every 60 seconds."""
-    logger.info("Starting value repeat timer (every 60s)...")
+    """Background thread that handles EOS recovery replay and optional periodic resend."""
+    global eos_recovery_mode
+
+    logger.info(
+        "Starting EOS recovery monitor "
+        f"(health check every {EOS_HEALTH_CHECK_INTERVAL_S}s, periodic resend enabled={ENABLE_PERIODIC_RESEND})..."
+    )
+    last_periodic_resend_ts = 0.0
+
     while repeat_thread_running:
         try:
-            time.sleep(EOS_SEND_INTERVAL_S)
+            time.sleep(EOS_HEALTH_CHECK_INTERVAL_S)
             if not repeat_thread_running:
                 break
-            
-            logger.debug("(60s timer) Resending all cached values...")
-            
-            # Resend BMW SOC
-            bmw_key = TOPIC_MAPPING[TOPIC_BMW_SOC]["eos_key"]
-            if bmw_key in eos_last_values and eos_last_values[bmw_key] is not None:
-                value = eos_last_values[bmw_key]
-                send_measurement_to_eos(
-                    bmw_key,
-                    value,
-                    TOPIC_MAPPING[TOPIC_BMW_SOC]["description"],
-                    force=True,
-                    source="repeat",
-                    value_formatted=f"{value:.1%}",
-                )
 
-            # Resend virtual battery SOC (combined)
-            if battery_soc_factor is not None:
-                virtual_soc = get_virtual_soc_factor()
-                if virtual_soc is not None:
-                    send_measurement_to_eos(
-                        BATTERY_SOC_EOS_KEY,
-                        virtual_soc,
-                        f"Virtual Battery SOC (real={battery_soc_factor:.1%}, deficit={int(ev_deficit_wh)}Wh)",
-                        force=True,
-                        source="repeat",
-                        value_formatted=f"{virtual_soc:.1%}",
-                    )
+            if eos_recovery_mode:
+                if check_eos_reachable():
+                    logger.info("EOS reachable again, replaying cached values once.")
+                    replay_cached_measurements(source="recovery")
+                    eos_recovery_mode = False
+                continue
+
+            if ENABLE_PERIODIC_RESEND:
+                now_ts = time.time()
+                if now_ts - last_periodic_resend_ts >= EOS_SEND_INTERVAL_S:
+                    replay_cached_measurements(source="periodic")
+                    last_periodic_resend_ts = now_ts
             
         except Exception as e:
             logger.error(f"Error in repeat thread: {e}")
@@ -378,6 +453,21 @@ def send_virtual_soc():
         f"Virtual Battery SOC (real={battery_soc_factor:.1%}, deficit={int(ev_deficit_wh)}Wh)",
         source="virtual",
         value_formatted=value_formatted,
+    )
+
+
+def send_grid_export_sum() -> None:
+    """Send rounded sum of both export meter readings as grid_export_emr."""
+    export_sum_kwh = round(
+        sum(v for v in grid_export_meter_values.values() if v is not None),
+        2,
+    )
+    send_measurement_to_eos(
+        GRID_EXPORT_EMR_EOS_KEY,
+        export_sum_kwh,
+        GRID_EXPORT_EMR_DESCRIPTION,
+        source="mqtt",
+        value_formatted=f"{export_sum_kwh:.2f} kWh",
     )
 
 
@@ -639,19 +729,31 @@ def on_message(client, userdata, msg):
             # Send virtual combined SOC (not raw battery SOC)
             send_virtual_soc()
 
+        # Handle summed grid export from two cumulative export meters
+        elif topic in (TOPIC_GRID_EXPORT_KWH_1, TOPIC_GRID_EXPORT_KWH_2):
+            meter_value = max(0.0, float(payload))
+            grid_export_meter_values[topic] = meter_value
+            send_grid_export_sum()
+
         # Handle other direct mapped topics (BMW SOC)
         elif topic in TOPIC_MAPPING:
             config = TOPIC_MAPPING[topic]
             raw_value = float(payload)
             converted_value = config["converter"](raw_value)
 
-            value_formatted = f"{converted_value:.1%}"
+            formatter = config.get("formatter")
+            if callable(formatter):
+                value_formatted = formatter(converted_value)
+            else:
+                value_formatted = f"{converted_value:.3f}"
+
             send_measurement_to_eos(
                 config["eos_key"],
                 converted_value,
                 config["description"],
                 source="mqtt",
                 value_formatted=value_formatted,
+                min_delta=float(config.get("min_delta", 0.0)),
             )
 
         else:
@@ -685,6 +787,8 @@ def main():
     logger.info(f"MQTT User: {MQTT_USER}")
     logger.info(f"EOS URL: {EOS_URL}")
     logger.info(f"Log Level: {LOG_LEVEL}")
+    logger.info(f"EOS refresh interval: {EOS_REFRESH_INTERVAL_S}s (0=disabled)")
+    logger.info(f"Periodic resend enabled: {ENABLE_PERIODIC_RESEND}")
     logger.info("=" * 70)
 
     # Check EOS connectivity
