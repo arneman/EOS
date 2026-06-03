@@ -160,9 +160,7 @@ class EnergyManagement(
         plan = cls._plan
         summary: dict = {
             "start_datetime": str(cls._start_datetime) if cls._start_datetime else None,
-            "last_run_datetime": (
-                str(cls._last_run_datetime) if cls._last_run_datetime else None
-            ),
+            "last_run_datetime": (str(cls._last_run_datetime) if cls._last_run_datetime else None),
             "optimization_id": getattr(optimization_solution, "id", None),
             "optimization_rows": 0,
             "plan_rows": 0,
