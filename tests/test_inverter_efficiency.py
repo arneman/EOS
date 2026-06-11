@@ -496,6 +496,7 @@ def _make_mock_simulation(
     ac_charge_hours: list | None = None,
     elect_price_hourly: list | None = None,
     load_energy_array: list | None = None,
+    pv_prediction_wh: list | None = None,
 ):
     """Return a mock GeneticSimulation with configurable properties for penalty tests."""
     n = 24
@@ -527,6 +528,7 @@ def _make_mock_simulation(
     sim.ac_charge_hours = np.array(ac_charge_hours, dtype=float)
     sim.elect_price_hourly = np.array(elect_price_hourly, dtype=float)
     sim.load_energy_array = np.array(load_energy_array, dtype=float)
+    sim.pv_prediction_wh = None if pv_prediction_wh is None else np.array(pv_prediction_wh, dtype=float)
     return sim
 
 
@@ -535,8 +537,12 @@ def _run_evaluate_with_mocked_sim(
     mock_sim,
     *,
     ac_charge_break_even: float = 1.0,
+    battery_soc_target_miss: float = 0.0,
+    battery_soc_target_source_policy: str = "any",
     start_hour: int = 0,
     base_gesamtbilanz: float = 0.0,
+    akku_soc_pro_stunde: np.ndarray | None = None,
+    pv_akku=None,
 ):
     """
     Patch a GeneticOptimization so that:
@@ -555,7 +561,9 @@ def _run_evaluate_with_mocked_sim(
     config_eos.optimization.genetic.penalties = {
         "ev_soc_miss": 10,
         "ac_charge_break_even": ac_charge_break_even,
+        "battery_soc_target_miss": battery_soc_target_miss,
     }
+    config_eos.optimization.genetic.battery_soc_target_source_policy = battery_soc_target_source_policy
 
     optim = GeneticOptimization.__new__(GeneticOptimization)
     # Minimal __init__ state expected by evaluate()
@@ -570,6 +578,9 @@ def _run_evaluate_with_mocked_sim(
         "Gesamtbilanz_Euro": base_gesamtbilanz,
         "Gesamt_Verluste": 0.0,
         "EAuto_SoC_pro_Stunde": np.zeros(48),
+        "akku_soc_pro_stunde": (
+            akku_soc_pro_stunde if akku_soc_pro_stunde is not None else np.zeros(48)
+        ),
     }
 
     # DEAP individuals are lists that accept attribute assignment; use a trivial subclass
@@ -584,6 +595,7 @@ def _run_evaluate_with_mocked_sim(
             parameters=Mock(
                 ems=Mock(preis_euro_pro_wh_akku=0.0),
                 eauto=None,
+                pv_akku=pv_akku,
             ),
             start_hour=start_hour,
             worst_case=False,
@@ -878,3 +890,80 @@ class TestAcChargeBreakEvenPenalty:
         # = (6000 - 500) * 0.95 * 0.95 = 5500 * 0.9025 = 4963.75
         expected = 5500.0 * 0.95 * 0.95
         assert free_ac_wh == pytest.approx(expected, rel=1e-9)
+
+
+class TestBatterySocTargetPenalty:
+    """Tests for battery_soc_target_miss target hour and source policy."""
+
+    def test_target_hour_is_sunset_minus_one(self, config_eos):
+        n = 24
+        sim = _make_mock_simulation(
+            ac_charge_hours=[0.0] * n,
+            elect_price_hourly=[0.0003] * n,
+            load_energy_array=[0.0] * n,
+            pv_prediction_wh=[100.0, 100.0, 0.0] + [0.0] * (n - 3),
+        )
+        # With current sunset detection, first sunset boundary after start is reached
+        # when PV drops after hour 1, so target hour is (1 - 1) = 0.
+        # shortfall at hour 0 is 5 (max 100 - soc 95)
+        soc = np.array([95.0, 70.0] + [0.0] * (n - 2), dtype=float)
+
+        pv_akku = SimpleNamespace(
+            max_soc_percentage=100.0,
+            capacity_wh=10_000.0,
+            charging_efficiency=1.0,
+        )
+
+        fitness = _run_evaluate_with_mocked_sim(
+            config_eos,
+            sim,
+            battery_soc_target_miss=1.0,
+            battery_soc_target_source_policy="any",
+            start_hour=0,
+            base_gesamtbilanz=0.0,
+            akku_soc_pro_stunde=soc,
+            pv_akku=pv_akku,
+        )
+
+        assert fitness == pytest.approx(5.0, rel=1e-9)
+
+    def test_pv_surplus_only_blocks_non_pv_shortfall(self, config_eos):
+        n = 24
+        sim = _make_mock_simulation(
+            ac_charge_hours=[0.0] * n,
+            elect_price_hourly=[0.0003] * n,
+            load_energy_array=[200.0, 200.0] + [0.0] * (n - 2),
+            pv_prediction_wh=[100.0, 100.0, 0.0] + [0.0] * (n - 3),
+        )
+        # No PV surplus before target hour, so pv_surplus_only must not penalize.
+        soc = np.array([50.0, 50.0] + [0.0] * (n - 2), dtype=float)
+
+        pv_akku = SimpleNamespace(
+            max_soc_percentage=100.0,
+            capacity_wh=10_000.0,
+            charging_efficiency=1.0,
+        )
+
+        fitness_any = _run_evaluate_with_mocked_sim(
+            config_eos,
+            sim,
+            battery_soc_target_miss=1.0,
+            battery_soc_target_source_policy="any",
+            start_hour=0,
+            base_gesamtbilanz=0.0,
+            akku_soc_pro_stunde=soc,
+            pv_akku=pv_akku,
+        )
+        fitness_pv_only = _run_evaluate_with_mocked_sim(
+            config_eos,
+            sim,
+            battery_soc_target_miss=1.0,
+            battery_soc_target_source_policy="pv_surplus_only",
+            start_hour=0,
+            base_gesamtbilanz=0.0,
+            akku_soc_pro_stunde=soc,
+            pv_akku=pv_akku,
+        )
+
+        assert fitness_any == pytest.approx(50.0, rel=1e-9)
+        assert fitness_pv_only == pytest.approx(0.0, abs=1e-9)

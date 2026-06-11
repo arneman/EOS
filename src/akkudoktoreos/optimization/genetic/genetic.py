@@ -880,14 +880,10 @@ class GeneticOptimization(OptimizationBase):
             restwert_akku = battery_energy_content * parameters.ems.preis_euro_pro_wh_akku
             gesamtbilanz += -restwert_akku
 
-        # --- Battery target SOC at sunset penalty ---
-        # Penalise solutions where the battery does not reach max_soc_percentage by the
-        # time PV production ends (first sunset after start_hour).  This ensures the
-        # optimizer always plans to fill the battery during the day while the timing
-        # signal (feed-in tariff variation) still influences *when* charging happens.
-        # The penalty is only applied when there is enough excess PV (after load) between
-        # now and sunset to theoretically fill the SOC gap — preventing the optimizer
-        # from grid-charging just to avoid the penalty.
+        # --- Battery target SOC near sunset penalty ---
+        # Penalise solutions where the battery does not reach max_soc_percentage by
+        # one hour before first sunset after start_hour. The last hour before sunset
+        # often has little relevant production and is excluded from this target.
         if (
             self.simulation.battery
             and getattr(parameters, "pv_akku", None)
@@ -905,6 +901,16 @@ class GeneticOptimization(OptimizationBase):
                 pv_arr = self.simulation.pv_prediction_wh
                 load_arr = self.simulation.load_energy_array
                 horizon_end = min(start_hour + self.config.optimization.horizon_hours, len(pv_arr))
+                source_policy = str(
+                    getattr(
+                        self.config.optimization.genetic,
+                        "battery_soc_target_source_policy",
+                        "any",
+                    )
+                ).lower()
+                if source_policy not in {"any", "pv_surplus_only"}:
+                    source_policy = "any"
+
                 # Find last hour of first PV production period (first sunset)
                 last_pv_hour = None
                 found_pv = False
@@ -917,20 +923,38 @@ class GeneticOptimization(OptimizationBase):
                         break
 
                 if last_pv_hour is not None:
+                    target_hour = max(start_hour, last_pv_hour - 1)
                     soc_arr = simulation_result.get("akku_soc_pro_stunde")
                     if soc_arr is not None:
-                        soc_index = last_pv_hour - start_hour
+                        soc_index = target_hour - start_hour
                         if 0 <= soc_index < len(soc_arr):
-                            battery_soc_at_sunset = float(soc_arr[soc_index])
+                            battery_soc_at_target = float(soc_arr[soc_index])
                             target_soc = float(parameters.pv_akku.max_soc_percentage)
-                            if battery_soc_at_sunset < target_soc:
-                                # Penalise whenever battery is below target at sunset.
-                                # The ac_charge_break_even penalty already prevents
-                                # economically unjustified grid charging, so no additional
-                                # feasibility guard is needed here.
-                                gesamtbilanz += (
-                                    target_soc - battery_soc_at_sunset
-                                ) * battery_target_penalty
+                            soc_shortfall_pct = target_soc - battery_soc_at_target
+                            if soc_shortfall_pct > 0:
+                                penalized_shortfall_pct = soc_shortfall_pct
+                                if source_policy == "pv_surplus_only":
+                                    pv_surplus_wh = 0.0
+                                    for hour in range(start_hour, target_hour + 1):
+                                        pv_wh = float(pv_arr[hour])
+                                        load_wh = float(load_arr[hour])
+                                        if pv_wh > load_wh:
+                                            pv_surplus_wh += pv_wh - load_wh
+
+                                    capacity_wh = float(parameters.pv_akku.capacity_wh)
+                                    charge_eff = float(parameters.pv_akku.charging_efficiency)
+                                    if capacity_wh > 0 and charge_eff > 0:
+                                        max_soc_rise_pct = (
+                                            pv_surplus_wh * charge_eff / capacity_wh
+                                        ) * 100.0
+                                        penalized_shortfall_pct = min(
+                                            soc_shortfall_pct, max_soc_rise_pct
+                                        )
+                                    else:
+                                        penalized_shortfall_pct = 0.0
+
+                                if penalized_shortfall_pct > 0:
+                                    gesamtbilanz += penalized_shortfall_pct * battery_target_penalty
 
         # --- AC charging break-even penalty ---
         # Penalise AC charging decisions that cannot be economically justified given the

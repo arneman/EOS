@@ -52,6 +52,19 @@ class GeneticCommonSettings(SettingsBaseModel):
         },
     )
 
+    battery_soc_target_source_policy: str = Field(
+        default="any",
+        json_schema_extra={
+            "description": (
+                "Energy source policy for battery_soc_target_miss penalty. "
+                "'any' keeps legacy behavior (shortfall is penalized regardless of source), "
+                "'pv_surplus_only' penalizes only the shortfall that could theoretically be covered "
+                "by PV surplus before target time."
+            ),
+            "examples": ["any", "pv_surplus_only"],
+        },
+    )
+
     # --- Penalties (existing) -------------------------------------------------
 
     penalties: dict[str, Union[float, int, str]] = Field(

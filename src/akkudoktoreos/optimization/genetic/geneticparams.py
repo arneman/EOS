@@ -248,6 +248,16 @@ class GeneticOptimizationParameters(
             # Default 0.0: disabled unless explicitly enabled.  When set (e.g. 15),
             # applies a penalty of N € per % the battery is below max_soc at sunset.
             cls.config.optimization.genetic.penalties["battery_soc_target_miss"] = 0.0
+        source_policy = str(
+            getattr(cls.config.optimization.genetic, "battery_soc_target_source_policy", "any")
+        ).lower()
+        if source_policy not in {"any", "pv_surplus_only"}:
+            logger.info(
+                "Invalid battery_soc_target_source_policy '{}' - defaulting to 'any'.",
+                source_policy,
+            )
+            source_policy = "any"
+        cls.config.optimization.genetic.battery_soc_target_source_policy = source_policy
 
         # Get start solution from last run
         start_solution = None
