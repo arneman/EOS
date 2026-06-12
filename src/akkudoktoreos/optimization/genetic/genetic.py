@@ -923,7 +923,7 @@ class GeneticOptimization(OptimizationBase):
                         break
 
                 if last_pv_hour is not None:
-                    target_hour = max(start_hour, last_pv_hour - 1)
+                    target_hour = last_pv_hour
                     soc_arr = simulation_result.get("akku_soc_pro_stunde")
                     if soc_arr is not None:
                         soc_index = target_hour - start_hour
