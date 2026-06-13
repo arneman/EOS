@@ -65,6 +65,18 @@ class GeneticCommonSettings(SettingsBaseModel):
         },
     )
 
+    economic_objective_mode: str = Field(
+        default="pv_priority_evening_fill",
+        json_schema_extra={
+            "description": (
+                "Objective mode for GENETIC fitness evaluation. "
+                "'legacy' keeps existing heuristic penalties, "
+                "'pv_priority_evening_fill' uses evening PV-priority fill objective for comparison."
+            ),
+            "examples": ["legacy", "pv_priority_evening_fill"],
+        },
+    )
+
     # --- Penalties (existing) -------------------------------------------------
 
     penalties: dict[str, Union[float, int, str]] = Field(

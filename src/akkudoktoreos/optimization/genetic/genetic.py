@@ -880,10 +880,20 @@ class GeneticOptimization(OptimizationBase):
             restwert_akku = battery_energy_content * parameters.ems.preis_euro_pro_wh_akku
             gesamtbilanz += -restwert_akku
 
-        # --- Battery target SOC near sunset penalty ---
-        # Penalise solutions where the battery does not reach max_soc_percentage by
-        # one hour before first sunset after start_hour. The last hour before sunset
-        # often has little relevant production and is excluded from this target.
+        objective_mode = str(
+            getattr(
+                self.config.optimization.genetic,
+                "economic_objective_mode",
+                "pv_priority_evening_fill",
+            )
+        ).lower()
+        if objective_mode not in {"legacy", "pv_priority_evening_fill"}:
+            objective_mode = "pv_priority_evening_fill"
+
+        # --- Battery target SOC at sunset penalty ---
+        # Legacy mode keeps existing behavior.
+        # pv_priority_evening_fill mode uses a dynamic sunset target based on
+        # physically capturable PV surplus before sunset.
         if (
             self.simulation.battery
             and getattr(parameters, "pv_akku", None)
@@ -928,33 +938,73 @@ class GeneticOptimization(OptimizationBase):
                     if soc_arr is not None:
                         soc_index = target_hour - start_hour
                         if 0 <= soc_index < len(soc_arr):
+                            battery_soc_at_start = float(soc_arr[0])
                             battery_soc_at_target = float(soc_arr[soc_index])
-                            target_soc = float(parameters.pv_akku.max_soc_percentage)
-                            soc_shortfall_pct = target_soc - battery_soc_at_target
-                            if soc_shortfall_pct > 0:
-                                penalized_shortfall_pct = soc_shortfall_pct
-                                if source_policy == "pv_surplus_only":
-                                    pv_surplus_wh = 0.0
-                                    for hour in range(start_hour, target_hour + 1):
-                                        pv_wh = float(pv_arr[hour])
-                                        load_wh = float(load_arr[hour])
-                                        if pv_wh > load_wh:
-                                            pv_surplus_wh += pv_wh - load_wh
+                            capacity_wh = float(parameters.pv_akku.capacity_wh)
+                            charge_eff = float(parameters.pv_akku.charging_efficiency)
+                            max_soc_pct = float(parameters.pv_akku.max_soc_percentage)
 
-                                    capacity_wh = float(parameters.pv_akku.capacity_wh)
-                                    charge_eff = float(parameters.pv_akku.charging_efficiency)
-                                    if capacity_wh > 0 and charge_eff > 0:
-                                        max_soc_rise_pct = (
-                                            pv_surplus_wh * charge_eff / capacity_wh
-                                        ) * 100.0
-                                        penalized_shortfall_pct = min(
-                                            soc_shortfall_pct, max_soc_rise_pct
+                            if objective_mode == "pv_priority_evening_fill":
+                                capturable_pv_wh = 0.0
+                                max_charge_power_wh = float(self.simulation.battery.max_charge_power_w)
+                                for hour in range(start_hour, target_hour + 1):
+                                    pv_surplus_wh = max(0.0, float(pv_arr[hour]) - float(load_arr[hour]))
+                                    capturable_pv_wh += min(pv_surplus_wh, max_charge_power_wh)
+
+                                if capacity_wh > 0 and charge_eff > 0:
+                                    dynamic_soc_rise_pct = (
+                                        capturable_pv_wh * charge_eff / capacity_wh
+                                    ) * 100.0
+                                    target_soc = min(max_soc_pct, battery_soc_at_start + dynamic_soc_rise_pct)
+                                else:
+                                    target_soc = battery_soc_at_start
+
+                                soc_shortfall_pct = target_soc - battery_soc_at_target
+                                if soc_shortfall_pct > 0:
+                                    gesamtbilanz += soc_shortfall_pct * battery_target_penalty
+
+                                    # Anti-loophole: exporting before sunset while below dynamic
+                                    # evening target is discouraged in the new objective.
+                                    feedin_arr = simulation_result.get("Netzeinspeisung_Wh_pro_Stunde")
+                                    if feedin_arr is not None and capacity_wh > 0:
+                                        export_until_target_wh = float(
+                                            np.nansum(feedin_arr[: soc_index + 1])
                                         )
-                                    else:
-                                        penalized_shortfall_pct = 0.0
+                                        if export_until_target_wh > 0:
+                                            export_soc_equiv_pct = (
+                                                export_until_target_wh / capacity_wh
+                                            ) * 100.0
+                                            gesamtbilanz += (
+                                                export_soc_equiv_pct * battery_target_penalty
+                                            )
 
-                                if penalized_shortfall_pct > 0:
-                                    gesamtbilanz += penalized_shortfall_pct * battery_target_penalty
+                            else:
+                                target_soc = max_soc_pct
+                                soc_shortfall_pct = target_soc - battery_soc_at_target
+                                if soc_shortfall_pct > 0:
+                                    penalized_shortfall_pct = soc_shortfall_pct
+                                    if source_policy == "pv_surplus_only":
+                                        pv_surplus_wh = 0.0
+                                        for hour in range(start_hour, target_hour + 1):
+                                            pv_wh = float(pv_arr[hour])
+                                            load_wh = float(load_arr[hour])
+                                            if pv_wh > load_wh:
+                                                pv_surplus_wh += pv_wh - load_wh
+
+                                        if capacity_wh > 0 and charge_eff > 0:
+                                            max_soc_rise_pct = (
+                                                pv_surplus_wh * charge_eff / capacity_wh
+                                            ) * 100.0
+                                            penalized_shortfall_pct = min(
+                                                soc_shortfall_pct, max_soc_rise_pct
+                                            )
+                                        else:
+                                            penalized_shortfall_pct = 0.0
+
+                                    if penalized_shortfall_pct > 0:
+                                        gesamtbilanz += (
+                                            penalized_shortfall_pct * battery_target_penalty
+                                        )
 
         # --- AC charging break-even penalty ---
         # Penalise AC charging decisions that cannot be economically justified given the
@@ -1062,7 +1112,8 @@ class GeneticOptimization(OptimizationBase):
         # Charge from PV should be economically more attractive in hours with lower
         # feed-in tariff, because charging in high feed-in hours sacrifices export revenue.
         if (
-            self.simulation.battery
+            objective_mode == "legacy"
+            and self.simulation.battery
             and self.simulation.dc_charge_hours is not None
             and self.simulation.ac_charge_hours is not None
             and self.simulation.elect_revenue_per_hour_arr is not None

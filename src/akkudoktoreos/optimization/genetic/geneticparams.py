@@ -259,6 +259,21 @@ class GeneticOptimizationParameters(
             source_policy = "any"
         cls.config.optimization.genetic.battery_soc_target_source_policy = source_policy
 
+        objective_mode = str(
+            getattr(
+                cls.config.optimization.genetic,
+                "economic_objective_mode",
+                "pv_priority_evening_fill",
+            )
+        ).lower()
+        if objective_mode not in {"legacy", "pv_priority_evening_fill"}:
+            logger.info(
+                "Invalid economic_objective_mode '{}' - defaulting to 'pv_priority_evening_fill'.",
+                objective_mode,
+            )
+            objective_mode = "pv_priority_evening_fill"
+        cls.config.optimization.genetic.economic_objective_mode = objective_mode
+
         # Get start solution from last run
         start_solution = None
         last_solution = ems.genetic_solution()

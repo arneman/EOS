@@ -539,6 +539,7 @@ def _run_evaluate_with_mocked_sim(
     ac_charge_break_even: float = 1.0,
     battery_soc_target_miss: float = 0.0,
     battery_soc_target_source_policy: str = "any",
+    economic_objective_mode: str = "legacy",
     start_hour: int = 0,
     base_gesamtbilanz: float = 0.0,
     akku_soc_pro_stunde: np.ndarray | None = None,
@@ -564,6 +565,7 @@ def _run_evaluate_with_mocked_sim(
         "battery_soc_target_miss": battery_soc_target_miss,
     }
     config_eos.optimization.genetic.battery_soc_target_source_policy = battery_soc_target_source_policy
+    config_eos.optimization.genetic.economic_objective_mode = economic_objective_mode
 
     optim = GeneticOptimization.__new__(GeneticOptimization)
     # Minimal __init__ state expected by evaluate()
@@ -895,7 +897,7 @@ class TestAcChargeBreakEvenPenalty:
 class TestBatterySocTargetPenalty:
     """Tests for battery_soc_target_miss target hour and source policy."""
 
-    def test_target_hour_is_sunset_minus_one(self, config_eos):
+    def test_target_hour_is_sunset(self, config_eos):
         n = 24
         sim = _make_mock_simulation(
             ac_charge_hours=[0.0] * n,
@@ -904,8 +906,8 @@ class TestBatterySocTargetPenalty:
             pv_prediction_wh=[100.0, 100.0, 0.0] + [0.0] * (n - 3),
         )
         # With current sunset detection, first sunset boundary after start is reached
-        # when PV drops after hour 1, so target hour is (1 - 1) = 0.
-        # shortfall at hour 0 is 5 (max 100 - soc 95)
+        # when PV drops after hour 1, so target hour is 1.
+        # shortfall at hour 1 is 30 (max 100 - soc 70)
         soc = np.array([95.0, 70.0] + [0.0] * (n - 2), dtype=float)
 
         pv_akku = SimpleNamespace(
@@ -919,13 +921,14 @@ class TestBatterySocTargetPenalty:
             sim,
             battery_soc_target_miss=1.0,
             battery_soc_target_source_policy="any",
+            economic_objective_mode="legacy",
             start_hour=0,
             base_gesamtbilanz=0.0,
             akku_soc_pro_stunde=soc,
             pv_akku=pv_akku,
         )
 
-        assert fitness == pytest.approx(5.0, rel=1e-9)
+        assert fitness == pytest.approx(30.0, rel=1e-9)
 
     def test_pv_surplus_only_blocks_non_pv_shortfall(self, config_eos):
         n = 24
@@ -949,6 +952,7 @@ class TestBatterySocTargetPenalty:
             sim,
             battery_soc_target_miss=1.0,
             battery_soc_target_source_policy="any",
+            economic_objective_mode="legacy",
             start_hour=0,
             base_gesamtbilanz=0.0,
             akku_soc_pro_stunde=soc,
@@ -959,6 +963,7 @@ class TestBatterySocTargetPenalty:
             sim,
             battery_soc_target_miss=1.0,
             battery_soc_target_source_policy="pv_surplus_only",
+            economic_objective_mode="legacy",
             start_hour=0,
             base_gesamtbilanz=0.0,
             akku_soc_pro_stunde=soc,
@@ -967,3 +972,38 @@ class TestBatterySocTargetPenalty:
 
         assert fitness_any == pytest.approx(50.0, rel=1e-9)
         assert fitness_pv_only == pytest.approx(0.0, abs=1e-9)
+
+    def test_pv_priority_evening_fill_uses_dynamic_target(self, config_eos):
+        n = 24
+        sim = _make_mock_simulation(
+            ac_charge_hours=[0.0] * n,
+            elect_price_hourly=[0.0003] * n,
+            load_energy_array=[0.0, 0.0, 0.0] + [0.0] * (n - 3),
+            pv_prediction_wh=[100.0, 100.0, 0.0] + [0.0] * (n - 3),
+            capacity_wh=10_000.0,
+            max_charge_power_w=10_000.0,
+        )
+        # start SOC 50%. Capturable PV until target (hour 1) = 200 Wh.
+        # Dynamic target rise = 200 / 10000 * 100 = 2%, target=52%.
+        # SoC at target=51% -> shortfall 1% -> penalty 1.0
+        soc = np.array([50.0, 51.0] + [0.0] * (n - 2), dtype=float)
+
+        pv_akku = SimpleNamespace(
+            max_soc_percentage=100.0,
+            capacity_wh=10_000.0,
+            charging_efficiency=1.0,
+        )
+
+        fitness = _run_evaluate_with_mocked_sim(
+            config_eos,
+            sim,
+            battery_soc_target_miss=1.0,
+            battery_soc_target_source_policy="any",
+            economic_objective_mode="pv_priority_evening_fill",
+            start_hour=0,
+            base_gesamtbilanz=0.0,
+            akku_soc_pro_stunde=soc,
+            pv_akku=pv_akku,
+        )
+
+        assert fitness == pytest.approx(1.0, rel=1e-9)
