@@ -71,6 +71,9 @@ def test_optimize(
                 "genetic": {
                     "individuals": 300,
                     "generations": 10,
+                    "economic_objective_mode": (
+                        "legacy" if break_even else "pv_surplus_capture_objective"
+                    ),
                     "penalties": {
                         "ev_soc_miss": 10,
                         "ac_charge_break_even": break_even,

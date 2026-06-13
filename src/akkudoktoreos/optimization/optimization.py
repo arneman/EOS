@@ -71,9 +71,9 @@ class GeneticCommonSettings(SettingsBaseModel):
             "description": (
                 "Objective mode for GENETIC fitness evaluation. "
                 "'legacy' keeps existing heuristic penalties, "
-                "'pv_surplus_capture_objective' uses dynamic PV-surplus capture objective for comparison, "
-                "'pv_surplus_option_value' additionally values forecast future PV-surplus as a storage option "
-                "when evaluating AC grid charging decisions."
+                "'pv_surplus_capture_objective' uses economic balance plus a dynamic "
+                "PV-surplus capture objective for the sunset battery target, "
+                "'pv_surplus_option_value' is accepted as a deprecated alias."
             ),
             "examples": [
                 "legacy",

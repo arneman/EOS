@@ -276,6 +276,11 @@ class GeneticOptimizationParameters(
                 objective_mode,
             )
             objective_mode = "pv_surplus_capture_objective"
+        if objective_mode == "pv_surplus_option_value":
+            logger.info(
+                "economic_objective_mode 'pv_surplus_option_value' is deprecated - using 'pv_surplus_capture_objective'."
+            )
+            objective_mode = "pv_surplus_capture_objective"
         cls.config.optimization.genetic.economic_objective_mode = objective_mode
 
         # Get start solution from last run

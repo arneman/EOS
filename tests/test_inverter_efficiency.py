@@ -695,6 +695,33 @@ class TestAcChargeBreakEvenPenalty:
         # Fitness must be worse (higher) than base
         assert fitness > base + 1e-6
 
+    def test_capture_mode_skips_ac_break_even_penalty(self, config_eos):
+        """The economic capture mode uses balance plus sunset PV-capture objective only."""
+        n = 24
+        prices = [0.0004] + [0.0003] * (n - 1)
+        ac_charge = [1.0] + [0.0] * (n - 1)
+        loads = [1000.0] * n
+
+        sim = _make_mock_simulation(
+            ac_to_dc_efficiency=0.93,
+            dc_to_ac_efficiency=0.95,
+            charging_efficiency=0.95,
+            discharging_efficiency=0.95,
+            ac_charge_hours=ac_charge,
+            elect_price_hourly=prices,
+            load_energy_array=loads,
+            initial_soc_percentage=0.0,
+        )
+
+        fitness = _run_evaluate_with_mocked_sim(
+            config_eos,
+            sim,
+            base_gesamtbilanz=0.0,
+            economic_objective_mode="pv_surplus_capture_objective",
+        )
+
+        assert fitness == pytest.approx(0.0, abs=1e-9)
+
     # -----------------------------------------------------------------
     # 5d. Free PV energy covers expensive hours → penalty reduced/eliminated
     # -----------------------------------------------------------------
@@ -1012,11 +1039,10 @@ class TestBatterySocTargetPenalty:
 
         assert fitness == pytest.approx(1.0, rel=1e-9)
 
-
 class TestPvSurplusOptionValueObjective:
-    """Objective mode extension that values future PV surplus as storage alternative."""
+    """Deprecated objective mode alias kept for configuration compatibility."""
 
-    def test_future_pv_surplus_increases_cost_of_night_grid_charge(self, config_eos):
+    def test_future_pv_surplus_option_value_matches_capture_mode(self, config_eos):
         n = 24
         prices = [0.00018] * 5 + [0.00026] * (n - 5)
         ac_charge = [0.4] + [0.0] * (n - 1)
@@ -1055,7 +1081,7 @@ class TestPvSurplusOptionValueObjective:
             economic_objective_mode="pv_surplus_option_value",
         )
 
-        assert fitness_option > fitness_capture
+        assert fitness_option == pytest.approx(fitness_capture, rel=1e-12)
 
     def test_without_future_surplus_new_mode_matches_capture_mode(self, config_eos):
         n = 24
