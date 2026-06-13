@@ -776,6 +776,29 @@ class TestAcChargeBreakEvenPenalty:
 
         assert fitness > 1e-6
 
+    def test_later_ac_charge_cannot_reuse_already_covered_future_peak(self, config_eos):
+        """Earlier AC charge should consume the profitable future peak before later hours are judged."""
+        n = 6
+        prices = [0.0002, 0.0002, 0.0004, 0.0001, 0.0001, 0.0001]
+        ac_charge = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        loads = [0.0, 0.0, 1000.0, 1000.0, 1000.0, 1000.0]
+
+        sim = _make_mock_simulation(
+            ac_to_dc_efficiency=1.0,
+            dc_to_ac_efficiency=1.0,
+            charging_efficiency=1.0,
+            discharging_efficiency=1.0,
+            max_charge_power_w=1000.0,
+            ac_charge_hours=ac_charge,
+            elect_price_hourly=prices,
+            load_energy_array=loads,
+            initial_soc_percentage=0.0,
+        )
+
+        fitness = _run_evaluate_with_mocked_sim(config_eos, sim, base_gesamtbilanz=0.0)
+
+        assert fitness > 1e-6
+
     # -----------------------------------------------------------------
     # 5d. Free PV energy covers expensive hours → penalty reduced/eliminated
     # -----------------------------------------------------------------

@@ -1072,18 +1072,32 @@ class GeneticOptimization(OptimizationBase):
                     ac_penalty_factor = 1.0
 
                 # Precompute sorted (price, load) tuples for all future hours once.
-                # Each charging hour needs the subset of hours after it, but since
-                # we sort by descending price, we can build the sorted list once and
-                # use a index-based slice for each hour.
+                # Each hour's future demand is shared across all AC charge decisions.
+                # Consume that demand cumulatively so multiple charge hours cannot all
+                # justify themselves against the same later high-price load.
                 horizon_end = min(len(ac_charge_arr), n)
-                # Build indexed list: (price, load, original_hour)
                 indexed_future = sorted(
-                    (
-                        (float(prices_arr[h]), float(load_arr[h]), h)
+                    [
+                        {
+                            "price": float(prices_arr[h]),
+                            "remaining_load": float(load_arr[h]),
+                            "hour": h,
+                        }
                         for h in range(start_hour, horizon_end)
-                    ),
-                    key=lambda x: -x[0],
+                    ],
+                    key=lambda slot: -slot["price"],
                 )
+
+                remaining_free = free_ac_wh
+                for slot in indexed_future:
+                    if remaining_free <= 0.0:
+                        break
+                    if remaining_free >= slot["remaining_load"]:
+                        remaining_free -= slot["remaining_load"]
+                        slot["remaining_load"] = 0.0
+                    else:
+                        slot["remaining_load"] -= remaining_free
+                        remaining_free = 0.0
 
                 for hour in range(start_hour, horizon_end):
                     ac_factor = ac_charge_arr[hour]
@@ -1096,27 +1110,32 @@ class GeneticOptimization(OptimizationBase):
 
                     # Price that a future discharge hour must reach to break even
                     break_even_price = charge_price / round_trip_eff
+                    dc_wh = bat.max_charge_power_w * ac_factor
+                    ac_wh = dc_wh / max(inv.ac_to_dc_efficiency, 1e-9)
+                    future_ac_wh = ac_wh * round_trip_eff
+                    remaining_future_ac_wh = future_ac_wh
+                    penalty_eur = 0.0
 
-                    # Consume free PV energy against the highest-price FUTURE hours.
-                    # Only consider hours strictly after the current charging hour.
-                    remaining_free = free_ac_wh
-                    best_uncovered_price = 0.0
-                    for fp, fl, fh in indexed_future:
-                        if fh <= hour:
-                            continue  # skip hours not in the future
-                        if remaining_free >= fl:
-                            remaining_free -= fl
-                        else:
-                            best_uncovered_price = fp
+                    for slot in indexed_future:
+                        if slot["hour"] <= hour or slot["remaining_load"] <= 0.0:
+                            continue
+
+                        covered_ac_wh = min(remaining_future_ac_wh, slot["remaining_load"])
+                        if covered_ac_wh <= 0.0:
+                            continue
+
+                        if slot["price"] < break_even_price:
+                            penalty_eur += covered_ac_wh * (break_even_price - slot["price"])
+
+                        slot["remaining_load"] -= covered_ac_wh
+                        remaining_future_ac_wh -= covered_ac_wh
+                        if remaining_future_ac_wh <= 0.0:
                             break
 
-                    if best_uncovered_price < break_even_price:
-                        # AC charging at this hour is economically unjustified.
-                        # Penalty = excess cost per Wh × DC energy requested this hour.
-                        dc_wh = bat.max_charge_power_w * ac_factor
-                        ac_wh = dc_wh / max(inv.ac_to_dc_efficiency, 1e-9)
-                        excess_cost_per_wh = break_even_price - best_uncovered_price
-                        gesamtbilanz += ac_wh * excess_cost_per_wh * ac_penalty_factor
+                    if remaining_future_ac_wh > 0.0:
+                        penalty_eur += remaining_future_ac_wh * break_even_price
+
+                    gesamtbilanz += penalty_eur * ac_penalty_factor
 
         # --- DC charging feed-in opportunity-cost penalty ---
         # Charge from PV should be economically more attractive in hours with lower
