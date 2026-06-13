@@ -1035,7 +1035,6 @@ class GeneticOptimization(OptimizationBase):
             and self.simulation.ac_charge_hours is not None
             and self.simulation.elect_price_hourly is not None
             and self.simulation.load_energy_array is not None
-            and objective_mode == "legacy"
         ):
             inv = self.simulation.inverter
             bat = self.simulation.battery

@@ -749,8 +749,8 @@ class TestAcChargeBreakEvenPenalty:
         # Fitness must be worse (higher) than base
         assert fitness > base + 1e-6
 
-    def test_capture_mode_skips_ac_break_even_penalty(self, config_eos):
-        """The economic capture mode uses balance plus sunset PV-capture objective only."""
+    def test_capture_mode_applies_ac_break_even_penalty(self, config_eos):
+        """Capture mode keeps the economic AC break-even signal for night grid charge."""
         n = 24
         prices = [0.0004] + [0.0003] * (n - 1)
         ac_charge = [1.0] + [0.0] * (n - 1)
@@ -774,7 +774,7 @@ class TestAcChargeBreakEvenPenalty:
             economic_objective_mode="pv_surplus_capture_objective",
         )
 
-        assert fitness == pytest.approx(0.0, abs=1e-9)
+        assert fitness > 1e-6
 
     # -----------------------------------------------------------------
     # 5d. Free PV energy covers expensive hours → penalty reduced/eliminated
