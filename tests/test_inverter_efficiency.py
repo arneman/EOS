@@ -247,17 +247,23 @@ class TestAcChargingInSimulation:
             )
             akku.reset()
 
-            inverter = Inverter(
-                InverterParameters(
-                    device_id="inverter1",
-                    max_power_wh=10000,
-                    battery_id="battery1",
-                    ac_to_dc_efficiency=ac_to_dc_efficiency,
-                    dc_to_ac_efficiency=dc_to_ac_efficiency,
-                    max_ac_charge_power_w=max_ac_charge_power_w,
-                ),
-                battery=akku,
-            )
+            mock_self_consumption_predictor = Mock()
+            mock_self_consumption_predictor.calculate_self_consumption.return_value = 1.0
+            with patch(
+                "akkudoktoreos.devices.genetic.inverter.get_eos_load_interpolator",
+                return_value=mock_self_consumption_predictor,
+            ):
+                inverter = Inverter(
+                    InverterParameters(
+                        device_id="inverter1",
+                        max_power_wh=10000,
+                        battery_id="battery1",
+                        ac_to_dc_efficiency=ac_to_dc_efficiency,
+                        dc_to_ac_efficiency=dc_to_ac_efficiency,
+                        max_ac_charge_power_w=max_ac_charge_power_w,
+                    ),
+                    battery=akku,
+                )
 
             sim = GeneticSimulation()
             if pv_forecast_wh is None:
@@ -384,15 +390,16 @@ class TestAcChargingInSimulation:
         hour_idx = 1
         assert result["Netzbezug_Wh_pro_Stunde"][hour_idx] == pytest.approx(0.0, abs=1e-3)
         assert result["Netzeinspeisung_Wh_pro_Stunde"][hour_idx] == pytest.approx(
-            1500.0, rel=1e-3
+            6500.0, rel=1e-3
         )
+        assert result["akku_soc_pro_stunde"][2] == pytest.approx(22.5, rel=1e-3)
 
     def test_ac_charge_imports_only_residual_after_using_pv_export(self, simulation_setup):
         """If PV export is smaller than AC charge demand, only the residual may import."""
         sim, akku, inverter = simulation_setup(
             ac_to_dc_efficiency=1.0,
             battery_initial_soc_pct=0,
-            pv_forecast_wh=[0.0, 7000.0] + [0.0] * 46,
+            pv_forecast_wh=[0.0, 3000.0] + [0.0] * 46,
             load_forecast_wh=[1000.0] * 48,
         )
 
@@ -403,8 +410,9 @@ class TestAcChargingInSimulation:
         result = sim.simulate(start_hour=0)
 
         hour_idx = 1
-        assert result["Netzbezug_Wh_pro_Stunde"][hour_idx] == pytest.approx(1500.0, rel=1e-3)
+        assert result["Netzbezug_Wh_pro_Stunde"][hour_idx] == pytest.approx(500.0, rel=1e-3)
         assert result["Netzeinspeisung_Wh_pro_Stunde"][hour_idx] == pytest.approx(0.0, abs=1e-3)
+        assert result["akku_soc_pro_stunde"][2] == pytest.approx(22.5, rel=1e-3)
 
     def test_ac_charge_limited_by_max_ac_power(self, simulation_setup):
         """max_ac_charge_power_w limits the effective charge factor."""

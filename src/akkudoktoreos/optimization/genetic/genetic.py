@@ -266,8 +266,10 @@ class GeneticSimulation(PydanticBaseModel):
             dc_charge_hours_fast[end_hour:] = 0
             ac_charge_hours_fast[0:start_hour] = 0
             ac_charge_hours_fast[end_hour:] = 0
+            # AC-charge hours are modeled on the AC bus. In those hours we must not also
+            # perform the legacy direct PV->battery charge path inside process_energy().
             battery_fast.charge_array = np.where(
-                ac_charge_hours_fast != 0, ac_charge_hours_fast, dc_charge_hours_fast
+                ac_charge_hours_fast != 0, 0.0, dc_charge_hours_fast
             )
             # Fill the discharge array of the battery
             bat_discharge_hours_fast[0:start_hour] = 0
@@ -371,6 +373,7 @@ class GeneticSimulation(PydanticBaseModel):
                         effective_charge_factor = min(effective_charge_factor, max_dc_factor)
 
                     if effective_charge_factor > 0:
+                        battery_fast.charge_array[hour] = effective_charge_factor
                         battery_charged_energy_actual, battery_losses_actual = (
                             battery_fast.charge_energy(
                                 None, hour, charge_factor=effective_charge_factor
