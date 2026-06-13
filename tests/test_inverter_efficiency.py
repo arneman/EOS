@@ -799,6 +799,48 @@ class TestAcChargeBreakEvenPenalty:
 
         assert fitness > 1e-6
 
+    def test_future_pv_surplus_removes_profitable_ac_discharge_window(self, config_eos):
+        """Future PV-covered load should not justify night AC charging against the same price peak."""
+        n = 4
+        prices = [0.0001, 0.0003, 0.0003, 0.0003]
+        ac_charge = [1.0, 0.0, 0.0, 0.0]
+        loads = [0.0, 1000.0, 1000.0, 1000.0]
+
+        sim_without_pv = _make_mock_simulation(
+            ac_to_dc_efficiency=0.93,
+            dc_to_ac_efficiency=0.95,
+            charging_efficiency=0.95,
+            discharging_efficiency=0.95,
+            max_charge_power_w=1000.0,
+            ac_charge_hours=ac_charge,
+            elect_price_hourly=prices,
+            load_energy_array=loads,
+            pv_prediction_wh=[0.0] * n,
+            initial_soc_percentage=0.0,
+        )
+        sim_with_pv = _make_mock_simulation(
+            ac_to_dc_efficiency=0.93,
+            dc_to_ac_efficiency=0.95,
+            charging_efficiency=0.95,
+            discharging_efficiency=0.95,
+            max_charge_power_w=1000.0,
+            ac_charge_hours=ac_charge,
+            elect_price_hourly=prices,
+            load_energy_array=loads,
+            pv_prediction_wh=[0.0, 1000.0, 1000.0, 1000.0],
+            initial_soc_percentage=0.0,
+        )
+
+        fitness_without_pv = _run_evaluate_with_mocked_sim(
+            config_eos, sim_without_pv, base_gesamtbilanz=0.0
+        )
+        fitness_with_pv = _run_evaluate_with_mocked_sim(
+            config_eos, sim_with_pv, base_gesamtbilanz=0.0
+        )
+
+        assert fitness_without_pv == pytest.approx(0.0, abs=1e-9)
+        assert fitness_with_pv > 1e-6
+
     # -----------------------------------------------------------------
     # 5d. Free PV energy covers expensive hours → penalty reduced/eliminated
     # -----------------------------------------------------------------

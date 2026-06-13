@@ -1051,6 +1051,7 @@ class GeneticOptimization(OptimizationBase):
                 ac_charge_arr = self.simulation.ac_charge_hours
                 prices_arr = self.simulation.elect_price_hourly
                 load_arr = self.simulation.load_energy_array
+                pv_arr = self.simulation.pv_prediction_wh
                 n = len(prices_arr)
 
                 # Usable AC energy already in battery from prior PV charging (zero grid cost).
@@ -1080,7 +1081,15 @@ class GeneticOptimization(OptimizationBase):
                     [
                         {
                             "price": float(prices_arr[h]),
-                            "remaining_load": float(load_arr[h]),
+                            "remaining_load": max(
+                                0.0,
+                                float(load_arr[h])
+                                - (
+                                    float(pv_arr[h])
+                                    if pv_arr is not None and h < len(pv_arr)
+                                    else 0.0
+                                ),
+                            ),
                             "hour": h,
                         }
                         for h in range(start_hour, horizon_end)
