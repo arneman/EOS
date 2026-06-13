@@ -497,6 +497,7 @@ def _make_mock_simulation(
     elect_price_hourly: list | None = None,
     load_energy_array: list | None = None,
     pv_prediction_wh: list | None = None,
+    elect_revenue_per_hour_arr: list | None = None,
 ):
     """Return a mock GeneticSimulation with configurable properties for penalty tests."""
     n = 24
@@ -506,6 +507,8 @@ def _make_mock_simulation(
         elect_price_hourly = [0.0003] * n        # 30 ct/kWh flat
     if load_energy_array is None:
         load_energy_array = [1000.0] * n          # 1 kWh constant load
+    if elect_revenue_per_hour_arr is None:
+        elect_revenue_per_hour_arr = [0.0] * n
 
     inv = SimpleNamespace(
         ac_to_dc_efficiency=ac_to_dc_efficiency,
@@ -529,6 +532,7 @@ def _make_mock_simulation(
     sim.elect_price_hourly = np.array(elect_price_hourly, dtype=float)
     sim.load_energy_array = np.array(load_energy_array, dtype=float)
     sim.pv_prediction_wh = None if pv_prediction_wh is None else np.array(pv_prediction_wh, dtype=float)
+    sim.elect_revenue_per_hour_arr = np.array(elect_revenue_per_hour_arr, dtype=float)
     return sim
 
 
@@ -1007,3 +1011,87 @@ class TestBatterySocTargetPenalty:
         )
 
         assert fitness == pytest.approx(1.0, rel=1e-9)
+
+
+class TestPvSurplusOptionValueObjective:
+    """Objective mode extension that values future PV surplus as storage alternative."""
+
+    def test_future_pv_surplus_increases_cost_of_night_grid_charge(self, config_eos):
+        n = 24
+        prices = [0.00018] * 5 + [0.00026] * (n - 5)
+        ac_charge = [0.4] + [0.0] * (n - 1)
+        loads = [300.0] * n
+
+        # Significant forecast surplus later in the day with non-zero feed-in tariff.
+        pv = [0.0] * 8 + [3000.0] * 8 + [0.0] * (n - 16)
+        feed_in = [0.00008] * n
+
+        sim = _make_mock_simulation(
+            ac_to_dc_efficiency=0.9,
+            dc_to_ac_efficiency=0.95,
+            charging_efficiency=0.9,
+            discharging_efficiency=0.9,
+            capacity_wh=39_790.0,
+            initial_soc_percentage=18.0,
+            min_soc_wh=39_790.0 * 0.05,
+            max_charge_power_w=19_000.0,
+            ac_charge_hours=ac_charge,
+            elect_price_hourly=prices,
+            load_energy_array=loads,
+            pv_prediction_wh=pv,
+            elect_revenue_per_hour_arr=feed_in,
+        )
+
+        fitness_capture = _run_evaluate_with_mocked_sim(
+            config_eos,
+            sim,
+            base_gesamtbilanz=0.0,
+            economic_objective_mode="pv_surplus_capture_objective",
+        )
+        fitness_option = _run_evaluate_with_mocked_sim(
+            config_eos,
+            sim,
+            base_gesamtbilanz=0.0,
+            economic_objective_mode="pv_surplus_option_value",
+        )
+
+        assert fitness_option > fitness_capture
+
+    def test_without_future_surplus_new_mode_matches_capture_mode(self, config_eos):
+        n = 24
+        prices = [0.00018] * 5 + [0.00026] * (n - 5)
+        ac_charge = [0.4] + [0.0] * (n - 1)
+        loads = [300.0] * n
+        pv = [0.0] * n
+        feed_in = [0.00008] * n
+
+        sim = _make_mock_simulation(
+            ac_to_dc_efficiency=0.9,
+            dc_to_ac_efficiency=0.95,
+            charging_efficiency=0.9,
+            discharging_efficiency=0.9,
+            capacity_wh=39_790.0,
+            initial_soc_percentage=18.0,
+            min_soc_wh=39_790.0 * 0.05,
+            max_charge_power_w=19_000.0,
+            ac_charge_hours=ac_charge,
+            elect_price_hourly=prices,
+            load_energy_array=loads,
+            pv_prediction_wh=pv,
+            elect_revenue_per_hour_arr=feed_in,
+        )
+
+        fitness_capture = _run_evaluate_with_mocked_sim(
+            config_eos,
+            sim,
+            base_gesamtbilanz=0.0,
+            economic_objective_mode="pv_surplus_capture_objective",
+        )
+        fitness_option = _run_evaluate_with_mocked_sim(
+            config_eos,
+            sim,
+            base_gesamtbilanz=0.0,
+            economic_objective_mode="pv_surplus_option_value",
+        )
+
+        assert fitness_option == pytest.approx(fitness_capture, rel=1e-12)

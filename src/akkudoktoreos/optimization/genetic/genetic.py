@@ -887,7 +887,11 @@ class GeneticOptimization(OptimizationBase):
                 "pv_surplus_capture_objective",
             )
         ).lower()
-        if objective_mode not in {"legacy", "pv_surplus_capture_objective"}:
+        if objective_mode not in {
+            "legacy",
+            "pv_surplus_capture_objective",
+            "pv_surplus_option_value",
+        }:
             objective_mode = "pv_surplus_capture_objective"
 
         # --- Battery target SOC at sunset penalty ---
@@ -944,7 +948,10 @@ class GeneticOptimization(OptimizationBase):
                             charge_eff = float(parameters.pv_akku.charging_efficiency)
                             max_soc_pct = float(parameters.pv_akku.max_soc_percentage)
 
-                            if objective_mode == "pv_surplus_capture_objective":
+                            if objective_mode in {
+                                "pv_surplus_capture_objective",
+                                "pv_surplus_option_value",
+                            }:
                                 capturable_pv_wh = 0.0
                                 max_charge_power_wh = float(
                                     self.simulation.battery.max_charge_power_w
@@ -1014,7 +1021,7 @@ class GeneticOptimization(OptimizationBase):
                                             penalized_shortfall_pct * battery_target_penalty
                                         )
 
-        # --- AC charging break-even penalty ---
+        # --- AC charging break-even objective term ---
         # Penalise AC charging decisions that cannot be economically justified given the
         # round-trip losses (AC→DC charge conversion, battery internal, DC→AC discharge
         # conversion) and the best available future electricity prices.
@@ -1083,6 +1090,8 @@ class GeneticOptimization(OptimizationBase):
                     key=lambda x: -x[0],
                 )
 
+                feed_in_arr = self.simulation.elect_revenue_per_hour_arr
+
                 for hour in range(start_hour, horizon_end):
                     ac_factor = ac_charge_arr[hour]
                     if ac_factor <= 0.0:
@@ -1115,6 +1124,66 @@ class GeneticOptimization(OptimizationBase):
                         ac_wh = dc_wh / max(inv.ac_to_dc_efficiency, 1e-9)
                         excess_cost_per_wh = break_even_price - best_uncovered_price
                         gesamtbilanz += ac_wh * excess_cost_per_wh * ac_penalty_factor
+
+                    # Optional objective extension:
+                    # Treat forecast future PV surplus as an alternative storage option.
+                    # If a significant share of currently requested AC grid charge could
+                    # instead be supplied by forecast PV surplus later, charge-now should
+                    # include this option value in the objective.
+                    if (
+                        objective_mode == "pv_surplus_option_value"
+                        and self.simulation.pv_prediction_wh is not None
+                        and self.simulation.elect_revenue_per_hour_arr is not None
+                    ):
+                        pv_arr = self.simulation.pv_prediction_wh
+                        future_surplus_dc_wh = 0.0
+                        future_surplus_weighted_feedin = 0.0
+
+                        for fh in range(hour + 1, horizon_end):
+                            pv_surplus_wh = max(0.0, float(pv_arr[fh]) - float(load_arr[fh]))
+                            if pv_surplus_wh <= 0.0:
+                                continue
+
+                            capturable_dc_wh = min(pv_surplus_wh, bat.max_charge_power_w)
+                            future_surplus_dc_wh += capturable_dc_wh
+                            future_surplus_weighted_feedin += capturable_dc_wh * float(
+                                feed_in_arr[fh]
+                            )
+
+                        if future_surplus_dc_wh > 0.0:
+                            ac_wh_requested = (
+                                bat.max_charge_power_w * ac_factor
+                            ) / max(inv.ac_to_dc_efficiency, 1e-9)
+                            future_surplus_ac_deliverable = (
+                                future_surplus_dc_wh
+                                * bat.charging_efficiency
+                                * inv.dc_to_ac_efficiency
+                            )
+
+                            ac_wh_replaceable = min(
+                                ac_wh_requested,
+                                future_surplus_ac_deliverable,
+                            )
+                            if ac_wh_replaceable > 0.0:
+                                avg_feed_in_per_dc_wh = (
+                                    future_surplus_weighted_feedin / future_surplus_dc_wh
+                                )
+                                pv_storage_cost_per_ac_wh = avg_feed_in_per_dc_wh / max(
+                                    bat.charging_efficiency * inv.dc_to_ac_efficiency,
+                                    1e-9,
+                                )
+                                grid_storage_cost_per_ac_wh = charge_price / max(
+                                    round_trip_eff,
+                                    1e-9,
+                                )
+
+                                option_gap = (
+                                    grid_storage_cost_per_ac_wh - pv_storage_cost_per_ac_wh
+                                )
+                                if option_gap > 0.0:
+                                    gesamtbilanz += (
+                                        ac_wh_replaceable * option_gap * ac_penalty_factor
+                                    )
 
         # --- DC charging feed-in opportunity-cost penalty ---
         # Charge from PV should be economically more attractive in hours with lower

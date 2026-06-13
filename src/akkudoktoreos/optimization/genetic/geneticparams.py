@@ -266,7 +266,11 @@ class GeneticOptimizationParameters(
                 "pv_surplus_capture_objective",
             )
         ).lower()
-        if objective_mode not in {"legacy", "pv_surplus_capture_objective"}:
+        if objective_mode not in {
+            "legacy",
+            "pv_surplus_capture_objective",
+            "pv_surplus_option_value",
+        }:
             logger.info(
                 "Invalid economic_objective_mode '{}' - defaulting to 'pv_surplus_capture_objective'.",
                 objective_mode,
