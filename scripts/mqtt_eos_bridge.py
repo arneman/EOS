@@ -8,6 +8,7 @@ Connects to MQTT broker and forwards device measurements to EOS REST API.
 MQTT Topics:
 - devices/bmw_i5/cardata/drivetrain/batteryManagement/header → BMW_i5-soc-factor
 - devices/victron_battery/battery_soc → LiFePO4_Cluster-soc-factor (combined virtual SOC)
+- devices/victron_battery/active_soc_limit → virtualized LiFePO4_Cluster min_soc_percentage
 - devices/powermeter/kwh → grid_import_emr (optional, cumulative grid import meter)
 - devices/powermeter/kwh_einspeisung + devices/powermeter_einspeisung/kwh_einspeisung
     → summed grid_export_emr (optional, cumulative export meter)
@@ -91,6 +92,7 @@ TOPIC_GRID_EXPORT_KWH_2 = "devices/powermeter_einspeisung/kwh_einspeisung"
 TOPIC_EV_DEFICIT = "devices/bmw_i5/battery_missing_until_max_soc_wh"
 TOPIC_EV_PLUGGED = "devices/bmw_i5/is_plugged"
 TOPIC_EV_MAX_POWER = "devices/bmw_i5/max_power"
+TOPIC_BATTERY_ACTIVE_SOC_LIMIT = "devices/victron_battery/active_soc_limit"
 
 # EOS measurement keys
 BMW_SOC_EOS_KEY = "BMW_i5-soc-factor"
@@ -107,6 +109,7 @@ GRID_EXPORT_EMR_DESCRIPTION = "Grid Export Energy Meter Reading"
 # Real battery hardware constants
 REAL_BATTERY_CAPACITY_WH = 30412
 REAL_BATTERY_MAX_CHARGE_W = 8000
+REAL_BATTERY_MIN_SOC_PERCENT_DEFAULT = 5.0
 EV_MAX_CHARGE_W_DEFAULT = 11000  # Used until MQTT publishes actual value
 
 SOC_SCALE_FACTOR = 100.0
@@ -172,6 +175,7 @@ MQTT_TOPICS = sorted(
         TOPIC_EV_DEFICIT,
         TOPIC_EV_PLUGGED,
         TOPIC_EV_MAX_POWER,
+        TOPIC_BATTERY_ACTIVE_SOC_LIMIT,
     }
 )
 
@@ -190,6 +194,8 @@ ev_max_charge_w: float = EV_MAX_CHARGE_W_DEFAULT  # EV max charge power from MQT
 battery_soc_factor: Optional[float] = None  # Last known real battery SOC (0.0-1.0)
 eos_current_capacity_wh: float = REAL_BATTERY_CAPACITY_WH  # Currently configured in EOS
 eos_current_max_charge_w: float = REAL_BATTERY_MAX_CHARGE_W  # Currently configured in EOS
+real_battery_min_soc_percentage: float = REAL_BATTERY_MIN_SOC_PERCENT_DEFAULT
+eos_current_min_soc_percentage: int = int(round(REAL_BATTERY_MIN_SOC_PERCENT_DEFAULT))
 grid_export_meter_values: Dict[str, Optional[float]] = {
     TOPIC_GRID_EXPORT_KWH_1: None,
     TOPIC_GRID_EXPORT_KWH_2: None,
@@ -389,21 +395,36 @@ def get_virtual_max_charge_w() -> float:
     return REAL_BATTERY_MAX_CHARGE_W
 
 
+def get_virtual_min_soc_percentage() -> int:
+    """Scale real battery min SoC to virtual capacity and return EOS-compatible percent."""
+    virtual_capacity_wh = get_virtual_capacity_wh()
+    if virtual_capacity_wh <= 0:
+        return 0
+
+    # Keep absolute protected energy in Wh constant while capacity is inflated.
+    min_soc_wh = (real_battery_min_soc_percentage / 100.0) * REAL_BATTERY_CAPACITY_WH
+    virtual_min_soc = (min_soc_wh / virtual_capacity_wh) * 100.0
+    virtual_min_soc_clamped = max(0.0, min(100.0, virtual_min_soc))
+    return int(round(virtual_min_soc_clamped))
+
+
 def update_eos_battery_config() -> bool:
     """Update EOS battery config with virtual capacity and charge power.
 
     Only sends updates if values actually changed.
     Returns True if successful (or no update needed), False on error.
     """
-    global eos_current_capacity_wh, eos_current_max_charge_w
+    global eos_current_capacity_wh, eos_current_max_charge_w, eos_current_min_soc_percentage
 
     new_capacity = int(get_virtual_capacity_wh())
     new_max_charge = int(get_virtual_max_charge_w())
+    new_min_soc_percentage = get_virtual_min_soc_percentage()
 
     capacity_changed = abs(new_capacity - eos_current_capacity_wh) > 100  # >100 Wh threshold
     charge_changed = abs(new_max_charge - eos_current_max_charge_w) > 100
+    min_soc_changed = new_min_soc_percentage != eos_current_min_soc_percentage
 
-    if not capacity_changed and not charge_changed:
+    if not capacity_changed and not charge_changed and not min_soc_changed:
         return True
 
     config_endpoint = f"{EOS_URL}{EOS_CONFIG_PATH}"
@@ -435,6 +456,24 @@ def update_eos_battery_config() -> bool:
             logger.info(f"✓ EOS max charge power updated: {new_max_charge} W")
         except requests.exceptions.RequestException as e:
             logger.error(f"✗ Failed to update EOS max charge power: {e}")
+            success = False
+
+    if min_soc_changed:
+        try:
+            resp = requests.put(
+                f"{config_endpoint}/min_soc_percentage",
+                json=new_min_soc_percentage,
+                timeout=EOS_PUT_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            eos_current_min_soc_percentage = new_min_soc_percentage
+            logger.info(
+                "✓ EOS min SOC updated: "
+                f"{new_min_soc_percentage}% (real={real_battery_min_soc_percentage:.1f}%, "
+                f"virtual capacity={new_capacity}Wh)"
+            )
+        except requests.exceptions.RequestException as e:
+            logger.error(f"✗ Failed to update EOS min SOC: {e}")
             success = False
 
     return success
@@ -688,7 +727,7 @@ def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=No
 
 def on_message(client, userdata, msg):
     """Callback when MQTT message is received."""
-    global ev_deficit_wh, battery_soc_factor, ev_plugged, ev_max_charge_w
+    global ev_deficit_wh, battery_soc_factor, ev_plugged, ev_max_charge_w, real_battery_min_soc_percentage
 
     topic = msg.topic
     payload = msg.payload.decode("utf-8")
@@ -719,6 +758,14 @@ def on_message(client, userdata, msg):
             if abs(new_max_w - ev_max_charge_w) > 100:
                 ev_max_charge_w = new_max_w
                 logger.info(f"(mqtt) ✓ EV max charge power: {int(ev_max_charge_w)} W")
+                update_eos_battery_config()
+
+        # Handle battery active min SOC limit (real battery %)
+        elif topic == TOPIC_BATTERY_ACTIVE_SOC_LIMIT:
+            new_min_soc = max(0.0, min(100.0, float(payload)))
+            if abs(new_min_soc - real_battery_min_soc_percentage) >= 0.1:
+                real_battery_min_soc_percentage = new_min_soc
+                logger.info(f"(mqtt) ✓ Battery active SoC limit: {real_battery_min_soc_percentage:.1f}%")
                 update_eos_battery_config()
 
         # Handle battery SOC → store real value and send virtual SOC
