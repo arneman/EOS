@@ -884,15 +884,15 @@ class GeneticOptimization(OptimizationBase):
             getattr(
                 self.config.optimization.genetic,
                 "economic_objective_mode",
-                "pv_priority_evening_fill",
+                "pv_surplus_capture_objective",
             )
         ).lower()
-        if objective_mode not in {"legacy", "pv_priority_evening_fill"}:
-            objective_mode = "pv_priority_evening_fill"
+        if objective_mode not in {"legacy", "pv_surplus_capture_objective"}:
+            objective_mode = "pv_surplus_capture_objective"
 
         # --- Battery target SOC at sunset penalty ---
         # Legacy mode keeps existing behavior.
-        # pv_priority_evening_fill mode uses a dynamic sunset target based on
+        # pv_surplus_capture_objective mode uses a dynamic sunset target based on
         # physically capturable PV surplus before sunset.
         if (
             self.simulation.battery
@@ -944,18 +944,24 @@ class GeneticOptimization(OptimizationBase):
                             charge_eff = float(parameters.pv_akku.charging_efficiency)
                             max_soc_pct = float(parameters.pv_akku.max_soc_percentage)
 
-                            if objective_mode == "pv_priority_evening_fill":
+                            if objective_mode == "pv_surplus_capture_objective":
                                 capturable_pv_wh = 0.0
-                                max_charge_power_wh = float(self.simulation.battery.max_charge_power_w)
+                                max_charge_power_wh = float(
+                                    self.simulation.battery.max_charge_power_w
+                                )
                                 for hour in range(start_hour, target_hour + 1):
-                                    pv_surplus_wh = max(0.0, float(pv_arr[hour]) - float(load_arr[hour]))
+                                    pv_surplus_wh = max(
+                                        0.0, float(pv_arr[hour]) - float(load_arr[hour])
+                                    )
                                     capturable_pv_wh += min(pv_surplus_wh, max_charge_power_wh)
 
                                 if capacity_wh > 0 and charge_eff > 0:
                                     dynamic_soc_rise_pct = (
                                         capturable_pv_wh * charge_eff / capacity_wh
                                     ) * 100.0
-                                    target_soc = min(max_soc_pct, battery_soc_at_start + dynamic_soc_rise_pct)
+                                    target_soc = min(
+                                        max_soc_pct, battery_soc_at_start + dynamic_soc_rise_pct
+                                    )
                                 else:
                                     target_soc = battery_soc_at_start
 
@@ -965,7 +971,9 @@ class GeneticOptimization(OptimizationBase):
 
                                     # Anti-loophole: exporting before sunset while below dynamic
                                     # evening target is discouraged in the new objective.
-                                    feedin_arr = simulation_result.get("Netzeinspeisung_Wh_pro_Stunde")
+                                    feedin_arr = simulation_result.get(
+                                        "Netzeinspeisung_Wh_pro_Stunde"
+                                    )
                                     if feedin_arr is not None and capacity_wh > 0:
                                         export_until_target_wh = float(
                                             np.nansum(feedin_arr[: soc_index + 1])

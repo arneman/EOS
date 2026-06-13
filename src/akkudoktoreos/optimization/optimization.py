@@ -66,14 +66,14 @@ class GeneticCommonSettings(SettingsBaseModel):
     )
 
     economic_objective_mode: str = Field(
-        default="pv_priority_evening_fill",
+        default="pv_surplus_capture_objective",
         json_schema_extra={
             "description": (
                 "Objective mode for GENETIC fitness evaluation. "
                 "'legacy' keeps existing heuristic penalties, "
-                "'pv_priority_evening_fill' uses evening PV-priority fill objective for comparison."
+                "'pv_surplus_capture_objective' uses dynamic PV-surplus capture objective for comparison."
             ),
-            "examples": ["legacy", "pv_priority_evening_fill"],
+            "examples": ["legacy", "pv_surplus_capture_objective"],
         },
     )
 

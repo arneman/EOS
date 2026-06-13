@@ -973,7 +973,7 @@ class TestBatterySocTargetPenalty:
         assert fitness_any == pytest.approx(50.0, rel=1e-9)
         assert fitness_pv_only == pytest.approx(0.0, abs=1e-9)
 
-    def test_pv_priority_evening_fill_uses_dynamic_target(self, config_eos):
+    def test_pv_surplus_capture_objective_uses_dynamic_target(self, config_eos):
         n = 24
         sim = _make_mock_simulation(
             ac_charge_hours=[0.0] * n,
@@ -999,7 +999,7 @@ class TestBatterySocTargetPenalty:
             sim,
             battery_soc_target_miss=1.0,
             battery_soc_target_source_policy="any",
-            economic_objective_mode="pv_priority_evening_fill",
+            economic_objective_mode="pv_surplus_capture_objective",
             start_hour=0,
             base_gesamtbilanz=0.0,
             akku_soc_pro_stunde=soc,
