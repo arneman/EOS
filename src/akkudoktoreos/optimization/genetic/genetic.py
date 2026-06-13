@@ -381,11 +381,18 @@ class GeneticSimulation(PydanticBaseModel):
                         dc_energy = battery_charged_energy_actual + battery_losses_actual
                         # AC energy consumed from grid (accounts for AC→DC conversion loss)
                         ac_energy = dc_energy / ac_to_dc_eff_fast
+                        # Technical constraint: do not import from grid while the same hour
+                        # still exports PV to the grid. Use current-hour AC export first.
+                        ac_energy_from_export = min(ac_energy, max(energy_feedin_grid_actual, 0.0))
+                        energy_feedin_grid_actual = max(
+                            0.0, energy_feedin_grid_actual - ac_energy_from_export
+                        )
+                        ac_energy_from_grid = ac_energy - ac_energy_from_export
                         # Inverter AC→DC conversion losses
                         inverter_charge_losses = ac_energy - dc_energy
 
                         consumption += ac_energy
-                        energy_consumption_grid_actual += ac_energy
+                        energy_consumption_grid_actual += ac_energy_from_grid
                         losses_wh_per_hour[hour_idx] += (
                             battery_losses_actual + inverter_charge_losses
                         )

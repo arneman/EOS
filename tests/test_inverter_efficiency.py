@@ -229,6 +229,8 @@ class TestAcChargingInSimulation:
             battery_discharging_efficiency: float = 0.90,
             battery_initial_soc_pct: int = 50,
             battery_max_charge_power_w: int = 5000,
+            pv_forecast_wh: list[float] | None = None,
+            load_forecast_wh: list[float] | None = None,
         ):
             akku = Battery(
                 SolarPanelBatteryParameters(
@@ -258,13 +260,17 @@ class TestAcChargingInSimulation:
             )
 
             sim = GeneticSimulation()
+            if pv_forecast_wh is None:
+                pv_forecast_wh = [0.0] * prediction_hours
+            if load_forecast_wh is None:
+                load_forecast_wh = [1000.0] * prediction_hours
             sim.prepare(
                 GeneticEnergyManagementParameters(
-                    pv_prognose_wh=[0.0] * prediction_hours,  # No PV
+                    pv_prognose_wh=pv_forecast_wh,
                     strompreis_euro_pro_wh=[0.0003] * prediction_hours,  # ~30ct/kWh
                     einspeiseverguetung_euro_pro_wh=0.00008,
                     preis_euro_pro_wh_akku=0.0001,
-                    gesamtlast=[1000.0] * prediction_hours,  # 1 kW constant load
+                    gesamtlast=load_forecast_wh,
                 ),
                 optimization_hours=config_eos.optimization.horizon_hours,
                 prediction_hours=prediction_hours,
@@ -359,6 +365,46 @@ class TestAcChargingInSimulation:
         hour_idx = 1
         assert result["Netzbezug_Wh_pro_Stunde"][hour_idx] == pytest.approx(1000.0, rel=1e-3)
         assert result["akku_soc_pro_stunde"][hour_idx] == pytest.approx(50.0, rel=1e-3)
+
+    def test_ac_charge_uses_pv_export_before_grid_import(self, simulation_setup):
+        """AC charging must consume same-hour PV export before importing from grid."""
+        sim, akku, inverter = simulation_setup(
+            ac_to_dc_efficiency=1.0,
+            battery_initial_soc_pct=0,
+            pv_forecast_wh=[0.0, 10000.0] + [0.0] * 46,
+            load_forecast_wh=[1000.0] * 48,
+        )
+
+        sim.ac_charge_hours[1] = 0.5
+        sim.dc_charge_hours[:] = 0
+        sim.bat_discharge_hours[:] = 0
+
+        result = sim.simulate(start_hour=0)
+
+        hour_idx = 1
+        assert result["Netzbezug_Wh_pro_Stunde"][hour_idx] == pytest.approx(0.0, abs=1e-3)
+        assert result["Netzeinspeisung_Wh_pro_Stunde"][hour_idx] == pytest.approx(
+            1500.0, rel=1e-3
+        )
+
+    def test_ac_charge_imports_only_residual_after_using_pv_export(self, simulation_setup):
+        """If PV export is smaller than AC charge demand, only the residual may import."""
+        sim, akku, inverter = simulation_setup(
+            ac_to_dc_efficiency=1.0,
+            battery_initial_soc_pct=0,
+            pv_forecast_wh=[0.0, 7000.0] + [0.0] * 46,
+            load_forecast_wh=[1000.0] * 48,
+        )
+
+        sim.ac_charge_hours[1] = 0.5
+        sim.dc_charge_hours[:] = 0
+        sim.bat_discharge_hours[:] = 0
+
+        result = sim.simulate(start_hour=0)
+
+        hour_idx = 1
+        assert result["Netzbezug_Wh_pro_Stunde"][hour_idx] == pytest.approx(1500.0, rel=1e-3)
+        assert result["Netzeinspeisung_Wh_pro_Stunde"][hour_idx] == pytest.approx(0.0, abs=1e-3)
 
     def test_ac_charge_limited_by_max_ac_power(self, simulation_setup):
         """max_ac_charge_power_w limits the effective charge factor."""
