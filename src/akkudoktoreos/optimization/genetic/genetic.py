@@ -283,6 +283,13 @@ class GeneticSimulation(PydanticBaseModel):
             max_ac_charge_w_fast = None
             ac_charging_possible = False
 
+        if battery_fast:
+            grid_energy_in_battery_wh = 0.0
+            grid_energy_in_battery_wh_per_hour = np.full((total_hours), np.nan)
+        else:
+            grid_energy_in_battery_wh = 0.0
+            grid_energy_in_battery_wh_per_hour = np.full((total_hours), 0.0)
+
         if ev_fast:
             # Pre-allocate arrays for the results, optimized for speed
             soc_ev_per_hour = np.full((total_hours), np.nan)
@@ -342,6 +349,7 @@ class GeneticSimulation(PydanticBaseModel):
             # not the post-DC result. Consistent with the EV SOC convention above.
             if battery_fast:
                 soc_per_hour[hour_idx] = battery_fast.current_soc_percentage()
+                grid_energy_in_battery_wh_per_hour[hour_idx] = grid_energy_in_battery_wh
 
             # Process inverter logic
             energy_feedin_grid_actual = energy_consumption_grid_actual = losses = eigenverbrauch = (
@@ -350,12 +358,29 @@ class GeneticSimulation(PydanticBaseModel):
 
             if inverter_fast:
                 energy_produced = pv_prediction_wh_fast[hour]
+                battery_energy_before_inverter = battery_fast.soc_wh if battery_fast else 0.0
                 (
                     energy_feedin_grid_actual,
                     energy_consumption_grid_actual,
                     losses,
                     eigenverbrauch,
                 ) = inverter_fast.process_energy(energy_produced, consumption, hour)
+                if battery_fast:
+                    battery_energy_after_inverter = battery_fast.soc_wh
+                    if battery_energy_after_inverter < battery_energy_before_inverter:
+                        discharged_energy_wh = (
+                            battery_energy_before_inverter - battery_energy_after_inverter
+                        )
+                        if battery_energy_before_inverter > 0.0 and grid_energy_in_battery_wh > 0.0:
+                            grid_energy_share = min(
+                                1.0,
+                                grid_energy_in_battery_wh / battery_energy_before_inverter,
+                            )
+                            grid_energy_in_battery_wh = max(
+                                0.0,
+                                grid_energy_in_battery_wh
+                                - discharged_energy_wh * grid_energy_share,
+                            )
 
             # AC PV Battery Charge
             if battery_fast:
@@ -393,6 +418,14 @@ class GeneticSimulation(PydanticBaseModel):
                         ac_energy_from_grid = ac_energy - ac_energy_from_export
                         # Inverter AC→DC conversion losses
                         inverter_charge_losses = ac_energy - dc_energy
+                        if ac_energy > 0.0 and battery_charged_energy_actual > 0.0:
+                            stored_energy_from_grid_wh = battery_charged_energy_actual * (
+                                ac_energy_from_grid / ac_energy
+                            )
+                            grid_energy_in_battery_wh = min(
+                                battery_fast.soc_wh,
+                                grid_energy_in_battery_wh + stored_energy_from_grid_wh,
+                            )
 
                         consumption += ac_energy
                         energy_consumption_grid_actual += ac_energy_from_grid
@@ -425,6 +458,7 @@ class GeneticSimulation(PydanticBaseModel):
             "Netzbezug_Wh_pro_Stunde": consumption_energy_per_hour,
             "Kosten_Euro_pro_Stunde": costs_per_hour,
             "akku_soc_pro_stunde": soc_per_hour,
+            "akku_grid_charge_wh_pro_stunde": grid_energy_in_battery_wh_per_hour,
             "Einnahmen_Euro_pro_Stunde": revenue_per_hour,
             "Gesamtbilanz_Euro": total_cost - total_revenue,  # Fitness score ("FitnessMin")
             "EAuto_SoC_pro_Stunde": soc_ev_per_hour,
@@ -951,6 +985,7 @@ class GeneticOptimization(OptimizationBase):
                 if last_pv_hour is not None:
                     target_hour = last_pv_hour
                     soc_arr = simulation_result.get("akku_soc_pro_stunde")
+                    grid_charge_arr = simulation_result.get("akku_grid_charge_wh_pro_stunde")
                     if soc_arr is not None:
                         soc_index = target_hour - start_hour
                         if 0 <= soc_index < len(soc_arr):
@@ -984,7 +1019,21 @@ class GeneticOptimization(OptimizationBase):
                                 else:
                                     target_soc = battery_soc_at_start
 
-                                soc_shortfall_pct = target_soc - battery_soc_at_target
+                                credited_battery_soc_at_target = battery_soc_at_target
+                                if grid_charge_arr is not None and 0 <= soc_index < len(grid_charge_arr):
+                                    grid_charge_wh_at_target = max(
+                                        0.0, float(grid_charge_arr[soc_index])
+                                    )
+                                    if capacity_wh > 0:
+                                        grid_charge_soc_pct_at_target = (
+                                            grid_charge_wh_at_target / capacity_wh
+                                        ) * 100.0
+                                        credited_battery_soc_at_target = max(
+                                            0.0,
+                                            battery_soc_at_target - grid_charge_soc_pct_at_target,
+                                        )
+
+                                soc_shortfall_pct = target_soc - credited_battery_soc_at_target
                                 if soc_shortfall_pct > 0:
                                     gesamtbilanz += soc_shortfall_pct * battery_target_penalty
 
@@ -1435,6 +1484,8 @@ class GeneticOptimization(OptimizationBase):
 
         # Perform final evaluation on the best solution
         simulation_result = self.evaluate_inner(start_solution)
+        simulation_result_public = dict(simulation_result)
+        simulation_result_public.pop("akku_grid_charge_wh_pro_stunde", None)
 
         # Prepare results
         discharge_hours_bin, eautocharge_hours_index, washingstart_int = self.split_individual(
@@ -1476,7 +1527,7 @@ class GeneticOptimization(OptimizationBase):
                 "dc_charge": dc_charge_hours,
                 "discharge_allowed": discharge,
                 "eautocharge_hours_float": eautocharge_hours_float,
-                "result": simulation_result,
+                "result": simulation_result_public,
                 "eauto_obj": self.simulation.ev.to_dict() if self.simulation.ev else None,
                 "start_solution": start_solution,
                 "spuelstart": washingstart_int,
@@ -1497,7 +1548,7 @@ class GeneticOptimization(OptimizationBase):
                 "dc_charge": dc_charge_hours,
                 "discharge_allowed": discharge,
                 "eautocharge_hours_float": eautocharge_hours_float,
-                "result": GeneticSimulationResult(**simulation_result),
+                "result": GeneticSimulationResult(**simulation_result_public),
                 "eauto_obj": self.simulation.ev,
                 "start_solution": start_solution,
                 "washingstart": washingstart_int,

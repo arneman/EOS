@@ -601,6 +601,7 @@ def _run_evaluate_with_mocked_sim(
     start_hour: int = 0,
     base_gesamtbilanz: float = 0.0,
     akku_soc_pro_stunde: np.ndarray | None = None,
+    akku_grid_charge_wh_pro_stunde: np.ndarray | None = None,
     pv_akku=None,
 ):
     """
@@ -640,6 +641,11 @@ def _run_evaluate_with_mocked_sim(
         "EAuto_SoC_pro_Stunde": np.zeros(48),
         "akku_soc_pro_stunde": (
             akku_soc_pro_stunde if akku_soc_pro_stunde is not None else np.zeros(48)
+        ),
+        "akku_grid_charge_wh_pro_stunde": (
+            akku_grid_charge_wh_pro_stunde
+            if akku_grid_charge_wh_pro_stunde is not None
+            else np.zeros(48)
         ),
     }
 
@@ -1153,6 +1159,40 @@ class TestBatterySocTargetPenalty:
             start_hour=0,
             base_gesamtbilanz=0.0,
             akku_soc_pro_stunde=soc,
+            pv_akku=pv_akku,
+        )
+
+        assert fitness == pytest.approx(1.0, rel=1e-9)
+
+    def test_capture_objective_does_not_credit_grid_charge_toward_pv_target(self, config_eos):
+        n = 24
+        sim = _make_mock_simulation(
+            ac_charge_hours=[0.0] * n,
+            elect_price_hourly=[0.0003] * n,
+            load_energy_array=[0.0, 0.0, 0.0] + [0.0] * (n - 3),
+            pv_prediction_wh=[100.0, 100.0, 0.0] + [0.0] * (n - 3),
+            capacity_wh=10_000.0,
+            max_charge_power_w=10_000.0,
+        )
+        soc = np.array([50.0, 52.0] + [0.0] * (n - 2), dtype=float)
+        grid_energy = np.array([0.0, 100.0] + [0.0] * (n - 2), dtype=float)
+
+        pv_akku = SimpleNamespace(
+            max_soc_percentage=100.0,
+            capacity_wh=10_000.0,
+            charging_efficiency=1.0,
+        )
+
+        fitness = _run_evaluate_with_mocked_sim(
+            config_eos,
+            sim,
+            battery_soc_target_miss=1.0,
+            battery_soc_target_source_policy="any",
+            economic_objective_mode="pv_surplus_capture_objective",
+            start_hour=0,
+            base_gesamtbilanz=0.0,
+            akku_soc_pro_stunde=soc,
+            akku_grid_charge_wh_pro_stunde=grid_energy,
             pv_akku=pv_akku,
         )
 
