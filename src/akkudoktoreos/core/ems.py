@@ -397,4 +397,4 @@ class EnergyManagement(
                     "Energy management run timed out after {}s — skipping this run.",
                     int(timeout_sec),
                 )
-                cls._stage = EnergyManagementStage.IDLE
+                EnergyManagement._stage = EnergyManagementStage.IDLE
