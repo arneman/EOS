@@ -1607,6 +1607,11 @@ class DatabaseRecordProtocolMixin(
 
         Ensures storage is loaded into memory first,
         then iterates over in-memory records only.
+
+        Uses binary search on the sorted timestamp index to skip to the first
+        record at or after start_timestamp in O(log n) instead of scanning
+        from the beginning, which is critical when the in-memory record set
+        is large (e.g. thousands of accumulated measurement records).
         """
         # Defensive call - model_post_init() may not have initialized metadata
         self._db_ensure_initialized()
@@ -1617,11 +1622,15 @@ class DatabaseRecordProtocolMixin(
             end_timestamp=end_timestamp,
         )
 
-        for record in self.records:
-            record_date_time_timestamp = DatabaseTimestamp.from_datetime(record.date_time)
+        # Use bisect to find the first record at or after start_timestamp.
+        # _db_sorted_timestamps and self.records are always kept in parallel
+        # (same insertion index), so bisect_left gives the correct slice start.
+        start_idx = 0
+        if start_timestamp and not isinstance(start_timestamp, _DatabaseTimestampUnbound):
+            start_idx = bisect.bisect_left(self._db_sorted_timestamps, start_timestamp)
 
-            if start_timestamp and record_date_time_timestamp < start_timestamp:
-                continue
+        for record in self.records[start_idx:]:
+            record_date_time_timestamp = DatabaseTimestamp.from_datetime(record.date_time)
 
             if end_timestamp and record_date_time_timestamp >= end_timestamp:
                 break
