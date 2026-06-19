@@ -1729,7 +1729,7 @@ class DatabaseRecordProtocolMixin(
                     f"Vacuum requested for database '{self.db_namespace()}' but keep limit is infinite."
                 )
                 return 0
-            keep_hours = keep_duration.hours
+            keep_hours = int(keep_duration.total_seconds() // 3600)
 
         if keep_hours is not None:
             _, db_max = self.db_timestamp_range()
