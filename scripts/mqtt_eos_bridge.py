@@ -625,23 +625,10 @@ def poll_eos_solution():
 
             # Extract battery operation mode (device ID prefix, not "battery1")
             mode, factor = get_active_mode(row, "LiFePO4_Cluster")
-            charge_allowed = 1 if mode in CHARGING_MODES else 0
-            discharge_allowed = 1 if mode in DISCHARGING_MODES else 0
 
-            # Battery charge power from genetic_ac_charge_factor (direct, no SOC delta)
-            if mode in CHARGING_MODES:
-                battery_power_w = int(row.get("genetic_ac_charge_factor", 0.0) * REAL_BATTERY_MAX_CHARGE_W)
-            else:
-                battery_power_w = 0
-
-            # EOS doesn't plan EV separately (virtual battery strategy) — mirror battery
-            ev_charge_allowed = charge_allowed
-            if ev_plugged and charge_allowed:
-                ev_power_w = min(battery_power_w, int(ev_max_charge_w))
-            else:
-                ev_power_w = 0
-
-            # Planned total for logging (battery SOC delta * real capacity)
+            # Derive planned battery power from SOC delta to match EOS plan semantics.
+            # Some plans increase SOC in modes like PEAK_SHAVING (e.g. PV surplus),
+            # while AC-charge factors remain zero.
             current_soc = row.get("LiFePO4_Cluster_soc_factor", 0.0)
             current_idx = sorted_timestamps.index(current_ts)
             if current_idx + 1 < len(sorted_timestamps):
@@ -650,6 +637,17 @@ def poll_eos_solution():
             else:
                 next_soc = current_soc
             planned_total_power_w = (next_soc - current_soc) * REAL_BATTERY_CAPACITY_WH
+
+            charge_allowed = 1 if planned_total_power_w > 1 else 0
+            discharge_allowed = 1 if planned_total_power_w < -1 else 0
+            battery_power_w = int(max(0.0, planned_total_power_w))
+
+            # EOS doesn't plan EV separately (virtual battery strategy) — mirror battery
+            ev_charge_allowed = charge_allowed
+            if ev_plugged and charge_allowed:
+                ev_power_w = min(battery_power_w, int(ev_max_charge_w))
+            else:
+                ev_power_w = 0
 
             # Publish current state (retained)
             mqtt_client.publish(MQTT_PUB_BATTERY_MODE, mode, retain=True)
@@ -667,18 +665,20 @@ def poll_eos_solution():
                     continue
                 r = sol[ts]
                 m, f = get_active_mode(r, "LiFePO4_Cluster")
-                # Compute planned battery power from genetic_ac_charge_factor
-                if m in CHARGING_MODES:
-                    power_w = int(r.get("genetic_ac_charge_factor", 0.0) * REAL_BATTERY_MAX_CHARGE_W)
-                elif m in DISCHARGING_MODES:
-                    power_w = -int(r.get("genetic_discharge_allowed_factor", 0.0) * REAL_BATTERY_MAX_CHARGE_W)
+                # Compute planned battery power from SOC delta so schedule reflects
+                # actual planned battery energy change, including PV-driven charging.
+                if i + 1 < len(sorted_timestamps):
+                    next_r = sol[sorted_timestamps[i + 1]]
+                    soc_now = r.get("LiFePO4_Cluster_soc_factor", 0.0)
+                    soc_next = next_r.get("LiFePO4_Cluster_soc_factor", soc_now)
+                    power_w = int((soc_next - soc_now) * REAL_BATTERY_CAPACITY_WH)
                 else:
                     power_w = 0
                 schedule.append({
                     "time": ts,
                     "mode": m,
                     "factor": round(f, 2),
-                    "charge": 1 if m in CHARGING_MODES else 0,
+                    "charge": 1 if power_w > 0 else 0,
                     "soc": round(r.get("LiFePO4_Cluster_soc_factor", 0.0), 3),
                     "power_w": power_w,
                 })
