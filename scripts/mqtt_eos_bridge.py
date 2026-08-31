@@ -15,12 +15,13 @@ MQTT Topics:
 - devices/bmw_i5//battery_missing_until_max_soc_wh → virtual battery capacity update
 
 EOS → MQTT (published):
-- eos/pv/forecast/hourly   → hourly PV AC power forecast (W per hour) for the rest of the day
-- eos/pv/total_daily       → total remaining PV production for today (kWh)
+- eos/pv/forecast/hourly          → hourly PV AC power forecast (Wh per hour) for the rest of the day
+- eos/pv/total_daily_remaining_wh → remaining PV production for today (Wh)
+- eos/pv/total_daily_wh           → full-day PV production for today (Wh, no time filter)
 
   These are fetched from the EOS prediction API:
-    GET /v1/prediction/list?key=pvforecast_ac_power&start_datetime=<today 00:00>&end_datetime=<tomorrow 00:00>
-  Values are in W per interval; the total is the area-under-curve converted to kWh.
+    GET /v1/prediction/list?key=pvforecast_ac_power&start_datetime=<...>&end_datetime=<...>
+  Values are in W per interval (1h → Wh). Timestamps are ISO format in the EOS timezone.
   Note: the API returns aggregated PV output only -- per-plant data is not exposed.
 
 Virtual Battery Strategy:
@@ -96,7 +97,8 @@ MQTT_PUB_EV_CHARGE = f"{MQTT_PUB_PREFIX}/ev/charge_allowed"
 MQTT_PUB_EV_POWER = f"{MQTT_PUB_PREFIX}/ev/charge_power_w"
 MQTT_PUB_SCHEDULE = f"{MQTT_PUB_PREFIX}/schedule"
 MQTT_PUB_PV_FORECAST_HOURLY = f"{MQTT_PUB_PREFIX}/pv/forecast/hourly"
-MQTT_PUB_PV_TOTAL_DAILY = f"{MQTT_PUB_PREFIX}/pv/total_daily"
+MQTT_PUB_PV_TOTAL_DAILY_REMAINING_WH = f"{MQTT_PUB_PREFIX}/pv/total_daily_remaining_wh"
+MQTT_PUB_PV_TOTAL_DAILY_WH = f"{MQTT_PUB_PREFIX}/pv/total_daily_wh"
 
 # MQTT Topics
 TOPIC_BMW_SOC = "devices/bmw_i5/cardata/drivetrain/batteryManagement/header"
@@ -365,20 +367,20 @@ def fetch_eos_timezone() -> Optional[str]:
         return None
 
 
-def fetch_pv_forecast() -> tuple[list[float], list[str], float]:
-    """Fetch today's remaining PV AC power forecast from the EOS API.
+def fetch_pv_forecast() -> tuple[list[float], list[str], float, float]:
+    """Fetch today's PV AC power forecast from the EOS API.
 
-    Requests the aggregated PV AC power forecast (W per hour) from the current
-    hour up to midnight of today (end of day). The current time and the
-    remaining-hours window are computed in the EOS-configured timezone (not the
-    machine's local timezone), so the result is correct even when the bridge
-    host runs in UTC while EOS runs in e.g. Europe/Berlin.
+    Requests the aggregated PV AC power forecast (W per hour). The current time
+    and the remaining-hours window are computed in the EOS-configured timezone
+    (not the machine's local timezone), so the result is correct even when the
+    bridge host runs in UTC while EOS runs in e.g. Europe/Berlin.
 
     Returns:
-        (values, hours, total_kwh)
+        (values, hours, total_remaining_wh, total_daily_wh)
             - values: PV AC power in W for each remaining hourly interval.
             - hours:  ISO timestamps (in the EOS timezone) for each interval.
-            - total_kwh: area-under-curve of the remaining forecast (Wh → kWh).
+            - total_remaining_wh: area-under-curve of the remaining forecast (Wh).
+            - total_daily_wh: area-under-curve of the full day 00:00→24:00 (Wh).
     """
     # Determine "now" in the EOS timezone so the remaining-hours window matches
     # the EOS prediction calendar (which is in the EOS timezone).
@@ -394,7 +396,9 @@ def fetch_pv_forecast() -> tuple[list[float], list[str], float]:
 
     start = now.replace(minute=0, second=0, microsecond=0)
     end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     try:
+        # Remaining hours of today (current hour → midnight).
         response = requests.get(
             f"{EOS_URL}{EOS_PREDICTION_LIST_PATH}",
             params={
@@ -408,52 +412,80 @@ def fetch_pv_forecast() -> tuple[list[float], list[str], float]:
         data = response.json()
         if not isinstance(data, list):
             logger.warning(f"Unexpected PV forecast format from EOS: {data!r}")
-            return [], [], 0.0
+            return [], [], 0.0, 0.0
         values = [float(v) for v in data]
-        total_kwh = sum(values) / 1000.0
+        total_remaining_wh = sum(values)
+
+        # Full day (00:00 → midnight) for the daily total without time filter.
+        response_day = requests.get(
+            f"{EOS_URL}{EOS_PREDICTION_LIST_PATH}",
+            params={
+                "key": "pvforecast_ac_power",
+                "start_datetime": day_start.strftime("%Y-%m-%d %H:00:00"),
+                "end_datetime": end.strftime("%Y-%m-%d %H:00:00"),
+            },
+            timeout=EOS_PUT_TIMEOUT_S,
+        )
+        response_day.raise_for_status()
+        data_day = response_day.json()
+        if not isinstance(data_day, list):
+            logger.warning(f"Unexpected PV forecast format from EOS: {data_day!r}")
+            total_daily_wh = 0.0
+        else:
+            total_daily_wh = sum(float(v) for v in data_day)
+
         # Build hourly timestamps in ISO format, kept in the EOS timezone.
         hours = [
             (start + timedelta(hours=i)).isoformat(timespec="minutes")
             for i in range(len(values))
         ]
-        return values, hours, total_kwh
+        return values, hours, total_remaining_wh, total_daily_wh
     except requests.exceptions.RequestException as e:
         logger.warning(f"✗ Failed to fetch PV forecast from EOS: {e}")
-        return [], [], 0.0
+        return [], [], 0.0, 0.0
     except (ValueError, TypeError) as e:
         logger.warning(f"✗ Unexpected PV forecast data from EOS: {e}")
-        return [], [], 0.0
+        return [], [], 0.0, 0.0
 
 
 def publish_pv_forecast() -> None:
-    """Fetch today's remaining PV forecast from EOS and publish it to MQTT.
+    """Fetch today's PV forecast from EOS and publish it to MQTT.
 
     Publishes:
-      - eos/pv/forecast/hourly  (JSON list of W per interval)
-      - eos/pv/total_daily      (remaining kWh today, as float string)
+      - eos/pv/forecast/hourly          (JSON list of {time, power_wh})
+      - eos/pv/total_daily_remaining_wh (remaining Wh today, as float string)
+      - eos/pv/total_daily_wh           (full-day Wh today, as float string)
 
     Skips publishing if the forecast is empty or MQTT is not connected.
     """
     if mqtt_client is None or not mqtt_client.is_connected():
         return
 
-    values, hours, total_kwh = fetch_pv_forecast()
+    values, hours, total_remaining_wh, total_daily_wh = fetch_pv_forecast()
     if not values:
         logger.debug("No PV forecast available, skipping MQTT publish.")
         return
 
-    # Align hourly payload to timestamps: list of {time, power_w}.
+    # Align hourly payload to timestamps: list of {time, power_wh}.
     hourly_payload = [
-        {"time": hours[i], "power_w": round(values[i], 0)} for i in range(len(values))
+        {"time": hours[i], "power_wh": round(values[i], 0)} for i in range(len(values))
     ]
     try:
         mqtt_client.publish(
             MQTT_PUB_PV_FORECAST_HOURLY, json.dumps(hourly_payload), retain=True
         )
-        mqtt_client.publish(MQTT_PUB_PV_TOTAL_DAILY, f"{total_kwh:.2f}", retain=True)
+        mqtt_client.publish(
+            MQTT_PUB_PV_TOTAL_DAILY_REMAINING_WH,
+            f"{total_remaining_wh:.0f}",
+            retain=True,
+        )
+        mqtt_client.publish(
+            MQTT_PUB_PV_TOTAL_DAILY_WH, f"{total_daily_wh:.0f}", retain=True
+        )
         logger.info(
             f"(eos→mqtt) PV forecast: {len(values)}h remaining, "
-            f"total today {total_kwh:.2f} kWh"
+            f"remaining today {total_remaining_wh:.0f} Wh, "
+            f"full day {total_daily_wh:.0f} Wh"
         )
     except Exception as e:
         logger.error(f"✗ Failed to publish PV forecast to MQTT: {e}")
