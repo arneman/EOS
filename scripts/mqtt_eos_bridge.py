@@ -49,6 +49,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional
+from zoneinfo import ZoneInfo
 
 try:
     import paho.mqtt.client as mqtt
@@ -74,6 +75,7 @@ EOS_MEASUREMENT_PATH = "/v1/measurement/value"
 EOS_CONFIG_PATH = "/v1/config/devices/batteries/0"
 EOS_HEALTH_PATH = "/v1/health"
 EOS_PREDICTION_LIST_PATH = "/v1/prediction/list"
+EOS_CONFIG_TIMEZONE_PATH = "/v1/config/general/timezone"
 
 EOS_PUT_TIMEOUT_S = 5
 EOS_HEALTH_TIMEOUT_S = 5
@@ -342,20 +344,54 @@ def check_eos_reachable() -> bool:
         return False
 
 
+def fetch_eos_timezone() -> Optional[str]:
+    """Fetch the EOS-configured timezone (e.g. 'Europe/Berlin') from the API.
+
+    Returns:
+        IANA timezone name, or None if unavailable.
+    """
+    try:
+        response = requests.get(
+            f"{EOS_URL}{EOS_CONFIG_TIMEZONE_PATH}", timeout=EOS_PUT_TIMEOUT_S
+        )
+        response.raise_for_status()
+        tz = response.json()
+        if isinstance(tz, str) and tz:
+            return tz
+        logger.warning(f"Unexpected timezone value from EOS: {tz!r}")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"✗ Failed to fetch EOS timezone: {e}")
+        return None
+
+
 def fetch_pv_forecast() -> tuple[list[float], list[str], float]:
     """Fetch today's remaining PV AC power forecast from the EOS API.
 
     Requests the aggregated PV AC power forecast (W per hour) from the current
-    hour up to midnight of today (end of day). The API sorts values
-    chronologically in ascending order of their hourly timestamp.
+    hour up to midnight of today (end of day). The current time and the
+    remaining-hours window are computed in the EOS-configured timezone (not the
+    machine's local timezone), so the result is correct even when the bridge
+    host runs in UTC while EOS runs in e.g. Europe/Berlin.
 
     Returns:
         (values, hours, total_kwh)
             - values: PV AC power in W for each remaining hourly interval.
-            - hours:  ISO timestamps (informational).
+            - hours:  ISO timestamps (in the EOS timezone) for each interval.
             - total_kwh: area-under-curve of the remaining forecast (Wh → kWh).
     """
-    now = datetime.now().astimezone()
+    # Determine "now" in the EOS timezone so the remaining-hours window matches
+    # the EOS prediction calendar (which is in the EOS timezone).
+    tz_name = fetch_eos_timezone()
+    if tz_name:
+        try:
+            now = datetime.now(ZoneInfo(tz_name))
+        except Exception as e:
+            logger.warning(f"Invalid EOS timezone '{tz_name}': {e}")
+            now = datetime.now().astimezone()
+    else:
+        now = datetime.now().astimezone()
+
     start = now.replace(minute=0, second=0, microsecond=0)
     end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     try:
@@ -375,9 +411,9 @@ def fetch_pv_forecast() -> tuple[list[float], list[str], float]:
             return [], [], 0.0
         values = [float(v) for v in data]
         total_kwh = sum(values) / 1000.0
-        # Build hourly timestamps (informational)
+        # Build hourly timestamps in ISO format, kept in the EOS timezone.
         hours = [
-            (start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:00:00")
+            (start + timedelta(hours=i)).isoformat(timespec="minutes")
             for i in range(len(values))
         ]
         return values, hours, total_kwh
