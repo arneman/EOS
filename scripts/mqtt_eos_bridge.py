@@ -15,9 +15,9 @@ MQTT Topics:
 - devices/bmw_i5//battery_missing_until_max_soc_wh → virtual battery capacity update
 
 EOS → MQTT (published):
-- eos/pv/forecast/hourly          → hourly PV AC power forecast (Wh per hour) for the rest of the day
-- eos/pv/total_daily_remaining_wh → remaining PV production for today (Wh)
-- eos/pv/total_daily_wh           → full-day PV production for today (Wh, no time filter)
+- eos/pv_forecast/hourly          → hourly PV AC power forecast (Wh per hour) for the rest of the day
+- eos/pv_forecast/today_remaining_wh → remaining PV production for today (Wh)
+- eos/pv_forecast/today_wh           → full-day PV production for today (Wh, no time filter)
 
   These are fetched from the EOS prediction API:
     GET /v1/prediction/list?key=pvforecast_ac_power&start_datetime=<...>&end_datetime=<...>
@@ -96,9 +96,11 @@ MQTT_PUB_BATTERY_POWER = f"{MQTT_PUB_PREFIX}/battery/charge_power_w"
 MQTT_PUB_EV_CHARGE = f"{MQTT_PUB_PREFIX}/ev/charge_allowed"
 MQTT_PUB_EV_POWER = f"{MQTT_PUB_PREFIX}/ev/charge_power_w"
 MQTT_PUB_SCHEDULE = f"{MQTT_PUB_PREFIX}/schedule"
-MQTT_PUB_PV_FORECAST_HOURLY = f"{MQTT_PUB_PREFIX}/pv/forecast/hourly"
-MQTT_PUB_PV_TOTAL_DAILY_REMAINING_WH = f"{MQTT_PUB_PREFIX}/pv/total_daily_remaining_wh"
-MQTT_PUB_PV_TOTAL_DAILY_WH = f"{MQTT_PUB_PREFIX}/pv/total_daily_wh"
+MQTT_PUB_PV_FORECAST_HOURLY = f"{MQTT_PUB_PREFIX}/pv_forecast/hourly"
+MQTT_PUB_PV_TOTAL_DAILY_REMAINING_WH = (
+    f"{MQTT_PUB_PREFIX}/pv_forecast/today_remaining_wh"
+)
+MQTT_PUB_PV_TOTAL_DAILY_WH = f"{MQTT_PUB_PREFIX}/pv_forecast/today_wh"
 
 # MQTT Topics
 TOPIC_BMW_SOC = "devices/bmw_i5/cardata/drivetrain/batteryManagement/header"
@@ -452,9 +454,9 @@ def publish_pv_forecast() -> None:
     """Fetch today's PV forecast from EOS and publish it to MQTT.
 
     Publishes:
-      - eos/pv/forecast/hourly          (JSON list of {time, power_wh})
-      - eos/pv/total_daily_remaining_wh (remaining Wh today, as float string)
-      - eos/pv/total_daily_wh           (full-day Wh today, as float string)
+      - eos/pv_forecast/hourly          (JSON list of {time, power_wh})
+      - eos/pv_forecast/today_remaining_wh (remaining Wh today, as float string)
+      - eos/pv_forecast/today_wh           (full-day Wh today, as float string)
 
     Skips publishing if the forecast is empty or MQTT is not connected.
     """
