@@ -514,9 +514,15 @@ def send_grid_export_sum() -> None:
 # EOS Solution → MQTT Publishing
 # =============================================================================
 
-# Battery operation modes that indicate charging is happening
+# Battery operation modes that indicate charging is allowed (from PV surplus or grid).
+# NON_EXPORT: DC charge from PV surplus, no discharge to grid.
+# GRID_SUPPORT_IMPORT: AC charge from grid.
+# FORCED_CHARGE: AC + DC charge, no discharge.
+# SELF_CONSUMPTION: DC charge from surplus + discharge allowed.
 CHARGING_MODES = {"NON_EXPORT", "GRID_SUPPORT_IMPORT", "FORCED_CHARGE", "SELF_CONSUMPTION"}
-DISCHARGING_MODES = {"PEAK_SHAVING", "GRID_SUPPORT_EXPORT", "FORCED_DISCHARGE"}
+# Battery operation modes that indicate discharging is allowed (to cover load or export).
+# SELF_CONSUMPTION allows both charging and discharging, so it appears in both sets.
+DISCHARGING_MODES = {"PEAK_SHAVING", "GRID_SUPPORT_EXPORT", "FORCED_DISCHARGE", "SELF_CONSUMPTION"}
 
 # All known operation modes (prefix stripped from column names)
 OPERATION_MODES = [
@@ -638,8 +644,22 @@ def poll_eos_solution():
                 next_soc = current_soc
             planned_total_power_w = (next_soc - current_soc) * REAL_BATTERY_CAPACITY_WH
 
-            charge_allowed = 1 if planned_total_power_w > 1 else 0
-            discharge_allowed = 1 if planned_total_power_w < -1 else 0
+            # Derive charge_allowed / discharge_allowed from the operation MODE
+            # (the optimizer's intent), not from the predicted SOC delta.
+            #
+            # The SOC delta only reflects what the optimizer PREDICTED would happen
+            # given the forecast. If the forecast is wrong (e.g. PV is higher than
+            # predicted), the battery should still be allowed to charge from the
+            # actual surplus. The operation mode encodes this permission:
+            #   NON_EXPORT / SELF_CONSUMPTION → DC charging allowed from PV surplus
+            #   PEAK_SHAVING / SELF_CONSUMPTION → discharging allowed
+            #   IDLE → neither
+            #
+            # Using the mode instead of the SOC delta ensures that when predictions
+            # are wrong, the battery still captures actual PV surplus instead of
+            # exporting it to grid.
+            charge_allowed = 1 if mode in CHARGING_MODES else 0
+            discharge_allowed = 1 if mode in DISCHARGING_MODES else 0
             battery_power_w = int(max(0.0, planned_total_power_w))
 
             # EOS doesn't plan EV separately (virtual battery strategy) — mirror battery
@@ -678,7 +698,7 @@ def poll_eos_solution():
                     "time": ts,
                     "mode": m,
                     "factor": round(f, 2),
-                    "charge": 1 if power_w > 0 else 0,
+                    "charge": 1 if m in CHARGING_MODES else 0,
                     "soc": round(r.get("LiFePO4_Cluster_soc_factor", 0.0), 3),
                     "power_w": power_w,
                 })
