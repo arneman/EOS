@@ -971,48 +971,49 @@ class GeneticOptimization(OptimizationBase):
                 if source_policy not in {"any", "pv_surplus_only"}:
                     source_policy = "any"
 
-                # Find all sunsets in the horizon: each is the last hour of a PV
-                # production period (PV > 0 followed by PV == 0).  The battery
-                # should be as full as possible after *every* sunset to avoid
-                # exporting surplus at a low feed-in rate and later importing at a
-                # high rate when consumption exceeds the forecast.
-                sunsets: list[int] = []
-                found_pv = False
+                # Find every PV production period in the horizon as a
+                # (sunrise, sunset) hour pair.  The battery should be as full as
+                # possible after *every* sunset to avoid exporting surplus at a
+                # low feed-in rate and later importing at a high rate when
+                # consumption exceeds the forecast.
+                pv_periods: list[tuple[int, int]] = []
+                first_pv_hour = None
                 last_pv_hour = None
                 for hour in range(start_hour, horizon_end):
                     if pv_arr[hour] > 0:
-                        found_pv = True
+                        if first_pv_hour is None:
+                            first_pv_hour = hour
                         last_pv_hour = hour
-                    elif found_pv:
+                    elif first_pv_hour is not None and last_pv_hour is not None:
                         # PV just dropped to zero — sunset
-                        sunsets.append(last_pv_hour)
-                        found_pv = False
+                        pv_periods.append((first_pv_hour, last_pv_hour))
+                        first_pv_hour = last_pv_hour = None
                 # Handle PV still producing at horizon end
-                if found_pv and last_pv_hour is not None:
-                    sunsets.append(last_pv_hour)
+                if first_pv_hour is not None and last_pv_hour is not None:
+                    pv_periods.append((first_pv_hour, last_pv_hour))
 
                 soc_arr = simulation_result.get("akku_soc_pro_stunde")
                 grid_charge_arr = simulation_result.get("akku_grid_charge_wh_pro_stunde")
 
-                if sunsets and soc_arr is not None:
+                if pv_periods and soc_arr is not None:
                     capacity_wh = float(parameters.pv_akku.capacity_wh)
                     charge_eff = float(parameters.pv_akku.charging_efficiency)
                     max_soc_pct = float(parameters.pv_akku.max_soc_percentage)
-                    max_charge_power_wh = float(
-                        self.simulation.battery.max_charge_power_w
-                    )
+                    max_charge_power_wh = float(self.simulation.battery.max_charge_power_w)
 
-                    # Track the start of the current PV production period.
-                    # For the first period this is start_hour; for subsequent
-                    # periods it is the hour after the previous sunset.
-                    period_start = start_hour
-
-                    for target_hour in sunsets:
+                    # Anchor the target on the SOC at sunrise, not at the
+                    # optimization start: any pre-sunrise discharge would
+                    # otherwise raise the shortfall 1:1 and be charged as if it
+                    # were uncaptured PV surplus.
+                    for period_start, target_hour in pv_periods:
                         soc_index = target_hour - start_hour
-                        if not (0 <= soc_index < len(soc_arr)):
+                        start_index = period_start - start_hour
+                        if not (0 <= soc_index < len(soc_arr)) or not (
+                            0 <= start_index < len(soc_arr)
+                        ):
                             continue
 
-                        battery_soc_at_start = float(soc_arr[period_start - start_hour])
+                        battery_soc_at_start = float(soc_arr[start_index])
                         battery_soc_at_target = float(soc_arr[soc_index])
 
                         if objective_mode in {
@@ -1037,7 +1038,9 @@ class GeneticOptimization(OptimizationBase):
                                 target_soc = battery_soc_at_start
 
                             credited_battery_soc_at_target = battery_soc_at_target
-                            if grid_charge_arr is not None and 0 <= soc_index < len(grid_charge_arr):
+                            if grid_charge_arr is not None and 0 <= soc_index < len(
+                                grid_charge_arr
+                            ):
                                 grid_charge_wh_at_target = max(
                                     0.0, float(grid_charge_arr[soc_index])
                                 )
@@ -1078,12 +1081,7 @@ class GeneticOptimization(OptimizationBase):
                                         penalized_shortfall_pct = 0.0
 
                                 if penalized_shortfall_pct > 0:
-                                    gesamtbilanz += (
-                                        penalized_shortfall_pct * battery_target_penalty
-                                    )
-
-                        # Next PV period starts the hour after this sunset
-                        period_start = target_hour + 1
+                                    gesamtbilanz += penalized_shortfall_pct * battery_target_penalty
 
         # --- AC charging break-even objective term ---
         # Penalise AC charging decisions that cannot be economically justified given the
