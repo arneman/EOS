@@ -1007,29 +1007,35 @@ class GeneticOptimization(OptimizationBase):
                             continue
                         battery_soc_at_target = float(soc_arr[soc_index])
 
-                        if objective_mode in {
-                            "pv_surplus_capture_objective",
-                            "pv_surplus_option_value",
-                        }:
-                            # Anchor the target on the SOC at the first hour with real
-                            # capturable surplus (PV > load), not merely the first hour
-                            # with any PV at all: dawn/dusk PV can be a trickle far
-                            # below load for a while, and anchoring there would still
-                            # raise the shortfall 1:1 for discharge during that
-                            # pre-surplus window, penalizing it as if it were
-                            # uncaptured PV surplus.
-                            anchor_hour = None
-                            for hour in range(period_start, target_hour + 1):
-                                if pv_arr[hour] > load_arr[hour]:
-                                    anchor_hour = hour
-                                    break
-                            if anchor_hour is None:
-                                # No hour in this PV period ever produced real surplus (e.g.
-                                # a heavily overcast day, or PV output far below load all
-                                # day). There is nothing captured to protect, so skip the
-                                # target for this period instead of freezing the battery at
-                                # whatever SOC it happens to have at some arbitrary hour.
-                                continue
+                        # Anchor is the first hour with real capturable surplus (PV >
+                        # load), not merely the first hour with any PV at all: dawn/dusk
+                        # PV can be a trickle far below load for a while, and anchoring
+                        # there would still raise the shortfall 1:1 for discharge during
+                        # that pre-surplus window, penalizing it as if it were
+                        # uncaptured PV surplus.
+                        anchor_hour = None
+                        total_pv_wh = 0.0
+                        total_load_wh = 0.0
+                        for hour in range(period_start, target_hour + 1):
+                            total_pv_wh += float(pv_arr[hour])
+                            total_load_wh += float(load_arr[hour])
+                            if anchor_hour is None and pv_arr[hour] > load_arr[hour]:
+                                anchor_hour = hour
+
+                        # Legacy mode keeps existing behavior. The dynamic capture-based
+                        # target also falls back to legacy when PV never exceeds load
+                        # anywhere in this period (e.g. a heavily overcast day) or when
+                        # total consumption over the period outweighs total production:
+                        # there is nothing captured to protect and the dynamic target
+                        # would degenerate (capturable surplus is 0).
+                        use_legacy = (
+                            objective_mode
+                            not in {"pv_surplus_capture_objective", "pv_surplus_option_value"}
+                            or anchor_hour is None
+                            or total_load_wh > total_pv_wh
+                        )
+
+                        if not use_legacy:
                             start_index = anchor_hour - start_hour
                             if not (0 <= start_index < len(soc_arr)):
                                 continue
