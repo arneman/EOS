@@ -971,99 +971,119 @@ class GeneticOptimization(OptimizationBase):
                 if source_policy not in {"any", "pv_surplus_only"}:
                     source_policy = "any"
 
-                # Find last hour of first PV production period (first sunset)
-                last_pv_hour = None
+                # Find all sunsets in the horizon: each is the last hour of a PV
+                # production period (PV > 0 followed by PV == 0).  The battery
+                # should be as full as possible after *every* sunset to avoid
+                # exporting surplus at a low feed-in rate and later importing at a
+                # high rate when consumption exceeds the forecast.
+                sunsets: list[int] = []
                 found_pv = False
+                last_pv_hour = None
                 for hour in range(start_hour, horizon_end):
                     if pv_arr[hour] > 0:
                         found_pv = True
                         last_pv_hour = hour
                     elif found_pv:
-                        # PV just dropped to zero — first sunset
-                        break
+                        # PV just dropped to zero — sunset
+                        sunsets.append(last_pv_hour)
+                        found_pv = False
+                # Handle PV still producing at horizon end
+                if found_pv and last_pv_hour is not None:
+                    sunsets.append(last_pv_hour)
 
-                if last_pv_hour is not None:
-                    target_hour = last_pv_hour
-                    soc_arr = simulation_result.get("akku_soc_pro_stunde")
-                    grid_charge_arr = simulation_result.get("akku_grid_charge_wh_pro_stunde")
-                    if soc_arr is not None:
+                soc_arr = simulation_result.get("akku_soc_pro_stunde")
+                grid_charge_arr = simulation_result.get("akku_grid_charge_wh_pro_stunde")
+
+                if sunsets and soc_arr is not None:
+                    capacity_wh = float(parameters.pv_akku.capacity_wh)
+                    charge_eff = float(parameters.pv_akku.charging_efficiency)
+                    max_soc_pct = float(parameters.pv_akku.max_soc_percentage)
+                    max_charge_power_wh = float(
+                        self.simulation.battery.max_charge_power_w
+                    )
+
+                    # Track the start of the current PV production period.
+                    # For the first period this is start_hour; for subsequent
+                    # periods it is the hour after the previous sunset.
+                    period_start = start_hour
+
+                    for target_hour in sunsets:
                         soc_index = target_hour - start_hour
-                        if 0 <= soc_index < len(soc_arr):
-                            battery_soc_at_start = float(soc_arr[0])
-                            battery_soc_at_target = float(soc_arr[soc_index])
-                            capacity_wh = float(parameters.pv_akku.capacity_wh)
-                            charge_eff = float(parameters.pv_akku.charging_efficiency)
-                            max_soc_pct = float(parameters.pv_akku.max_soc_percentage)
+                        if not (0 <= soc_index < len(soc_arr)):
+                            continue
 
-                            if objective_mode in {
-                                "pv_surplus_capture_objective",
-                                "pv_surplus_option_value",
-                            }:
-                                capturable_pv_wh = 0.0
-                                max_charge_power_wh = float(
-                                    self.simulation.battery.max_charge_power_w
+                        battery_soc_at_start = float(soc_arr[period_start - start_hour])
+                        battery_soc_at_target = float(soc_arr[soc_index])
+
+                        if objective_mode in {
+                            "pv_surplus_capture_objective",
+                            "pv_surplus_option_value",
+                        }:
+                            capturable_pv_wh = 0.0
+                            for hour in range(period_start, target_hour + 1):
+                                pv_surplus_wh = max(
+                                    0.0, float(pv_arr[hour]) - float(load_arr[hour])
                                 )
-                                for hour in range(start_hour, target_hour + 1):
-                                    pv_surplus_wh = max(
-                                        0.0, float(pv_arr[hour]) - float(load_arr[hour])
-                                    )
-                                    capturable_pv_wh += min(pv_surplus_wh, max_charge_power_wh)
+                                capturable_pv_wh += min(pv_surplus_wh, max_charge_power_wh)
 
-                                if capacity_wh > 0 and charge_eff > 0:
-                                    dynamic_soc_rise_pct = (
-                                        capturable_pv_wh * charge_eff / capacity_wh
-                                    ) * 100.0
-                                    target_soc = min(
-                                        max_soc_pct, battery_soc_at_start + dynamic_soc_rise_pct
-                                    )
-                                else:
-                                    target_soc = battery_soc_at_start
-
-                                credited_battery_soc_at_target = battery_soc_at_target
-                                if grid_charge_arr is not None and 0 <= soc_index < len(grid_charge_arr):
-                                    grid_charge_wh_at_target = max(
-                                        0.0, float(grid_charge_arr[soc_index])
-                                    )
-                                    if capacity_wh > 0:
-                                        grid_charge_soc_pct_at_target = (
-                                            grid_charge_wh_at_target / capacity_wh
-                                        ) * 100.0
-                                        credited_battery_soc_at_target = max(
-                                            0.0,
-                                            battery_soc_at_target - grid_charge_soc_pct_at_target,
-                                        )
-
-                                soc_shortfall_pct = target_soc - credited_battery_soc_at_target
-                                if soc_shortfall_pct > 0:
-                                    gesamtbilanz += soc_shortfall_pct * battery_target_penalty
-
+                            if capacity_wh > 0 and charge_eff > 0:
+                                dynamic_soc_rise_pct = (
+                                    capturable_pv_wh * charge_eff / capacity_wh
+                                ) * 100.0
+                                target_soc = min(
+                                    max_soc_pct, battery_soc_at_start + dynamic_soc_rise_pct
+                                )
                             else:
-                                target_soc = max_soc_pct
-                                soc_shortfall_pct = target_soc - battery_soc_at_target
-                                if soc_shortfall_pct > 0:
-                                    penalized_shortfall_pct = soc_shortfall_pct
-                                    if source_policy == "pv_surplus_only":
-                                        pv_surplus_wh = 0.0
-                                        for hour in range(start_hour, target_hour + 1):
-                                            pv_wh = float(pv_arr[hour])
-                                            load_wh = float(load_arr[hour])
-                                            if pv_wh > load_wh:
-                                                pv_surplus_wh += pv_wh - load_wh
+                                target_soc = battery_soc_at_start
 
-                                        if capacity_wh > 0 and charge_eff > 0:
-                                            max_soc_rise_pct = (
-                                                pv_surplus_wh * charge_eff / capacity_wh
-                                            ) * 100.0
-                                            penalized_shortfall_pct = min(
-                                                soc_shortfall_pct, max_soc_rise_pct
-                                            )
-                                        else:
-                                            penalized_shortfall_pct = 0.0
+                            credited_battery_soc_at_target = battery_soc_at_target
+                            if grid_charge_arr is not None and 0 <= soc_index < len(grid_charge_arr):
+                                grid_charge_wh_at_target = max(
+                                    0.0, float(grid_charge_arr[soc_index])
+                                )
+                                if capacity_wh > 0:
+                                    grid_charge_soc_pct_at_target = (
+                                        grid_charge_wh_at_target / capacity_wh
+                                    ) * 100.0
+                                    credited_battery_soc_at_target = max(
+                                        0.0,
+                                        battery_soc_at_target - grid_charge_soc_pct_at_target,
+                                    )
 
-                                    if penalized_shortfall_pct > 0:
-                                        gesamtbilanz += (
-                                            penalized_shortfall_pct * battery_target_penalty
+                            soc_shortfall_pct = target_soc - credited_battery_soc_at_target
+                            if soc_shortfall_pct > 0:
+                                gesamtbilanz += soc_shortfall_pct * battery_target_penalty
+
+                        else:
+                            target_soc = max_soc_pct
+                            soc_shortfall_pct = target_soc - battery_soc_at_target
+                            if soc_shortfall_pct > 0:
+                                penalized_shortfall_pct = soc_shortfall_pct
+                                if source_policy == "pv_surplus_only":
+                                    pv_surplus_wh = 0.0
+                                    for hour in range(period_start, target_hour + 1):
+                                        pv_wh = float(pv_arr[hour])
+                                        load_wh = float(load_arr[hour])
+                                        if pv_wh > load_wh:
+                                            pv_surplus_wh += pv_wh - load_wh
+
+                                    if capacity_wh > 0 and charge_eff > 0:
+                                        max_soc_rise_pct = (
+                                            pv_surplus_wh * charge_eff / capacity_wh
+                                        ) * 100.0
+                                        penalized_shortfall_pct = min(
+                                            soc_shortfall_pct, max_soc_rise_pct
                                         )
+                                    else:
+                                        penalized_shortfall_pct = 0.0
+
+                                if penalized_shortfall_pct > 0:
+                                    gesamtbilanz += (
+                                        penalized_shortfall_pct * battery_target_penalty
+                                    )
+
+                        # Next PV period starts the hour after this sunset
+                        period_start = target_hour + 1
 
         # --- AC charging break-even objective term ---
         # Penalise AC charging decisions that cannot be economically justified given the
