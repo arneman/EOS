@@ -24,8 +24,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch EOS plan and optimization solution")
     parser.add_argument(
         "--base-url",
-        default="http://proxmox-scripts:8503",
-        help="EOS API base URL (default: http://proxmox-scripts:8503)",
+        default="http://eos:8503",
+        help="EOS API base URL (default: http://eos:8503)",
     )
     parser.add_argument(
         "--output-dir",
