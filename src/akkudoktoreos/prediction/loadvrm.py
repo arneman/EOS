@@ -89,7 +89,9 @@ class LoadVrm(LoadProvider):
         if self.enabled is False:
             logger.info("LoadVrm is disabled, skipping update.")
             return
-        start_date = self.ems_start_datetime.start_of("day")
+        start_date = to_datetime(
+            self.ems_start_datetime, in_timezone=self.config.general.timezone
+        ).start_of("day")
         end_date = self.ems_start_datetime.add(hours=self.config.prediction.hours)
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())

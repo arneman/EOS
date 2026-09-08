@@ -73,7 +73,10 @@ class LoadAkkudoktor(LoadProvider):
         data_year_energy = self.load_data()
         # We provide prediction starting at start of day, to be compatible to old system.
         # End date for prediction is prediction hours from now.
-        date = self.ems_start_datetime.start_of("day")
+        # Interpret start of day in the configured location timezone.
+        date = to_datetime(
+            self.ems_start_datetime, in_timezone=self.config.general.timezone
+        ).start_of("day")
         end_date = self.ems_start_datetime.add(hours=self.config.prediction.hours)
         while compare_datetimes(date, end_date).lt:
             # Extract mean (index 0) and standard deviation (index 1) for the given day and hour
@@ -165,7 +168,10 @@ class LoadAkkudoktorAdjusted(LoadAkkudoktor):
         weekday_adjust, weekend_adjust = self._calculate_adjustment(data_year_energy)
         # We provide prediction starting at start of day, to be compatible to old system.
         # End date for prediction is prediction hours from now.
-        date = self.ems_start_datetime.start_of("day")
+        # Interpret start of day in the configured location timezone.
+        date = to_datetime(
+            self.ems_start_datetime, in_timezone=self.config.general.timezone
+        ).start_of("day")
         end_date = self.ems_start_datetime.add(hours=self.config.prediction.hours)
         while compare_datetimes(date, end_date).lt:
             # Extract mean (index 0) and standard deviation (index 1) for the given day and hour

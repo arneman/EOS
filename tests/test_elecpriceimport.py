@@ -112,3 +112,50 @@ def test_import(provider, sample_import_1_json, start_datetime, from_file, confi
     )
     # Allow for some difference due to value calculation on DST change
     npt.assert_allclose(result_values, expected_values, rtol=0.001)
+
+
+def test_import_uses_configured_timezone_not_host_timezone(
+    provider, sample_import_1_json, config_eos
+):
+    """Daily schedules align with the configured timezone, not the host's UTC timezone.
+
+    Regression test: (elecprice) schedules are local wall-clock time, but were previously
+    anchored to the host machine's local timezone. On a UTC host this shifted the HT/NT
+    schedule by the offset (e.g. 0-5am night rate landed on 0-5am UTC = 2-7am Europe/Berlin).
+    Ensure index 0 maps to 00:00 in the configured timezone regardless of host timezone.
+    """
+    key = "elecprice_marketprice_wh"
+    ems_eos = get_ems()
+    # Configured location timezone resolves from lat/long to Europe/Berlin.
+    # Default config uses Berlin coordinates (52.52, 13.405).
+    assert config_eos.general.timezone == "Europe/Berlin"
+    config_eos.elecprice.elecpriceimport.import_json = json.dumps(sample_import_1_json)
+    config_eos.elecprice.elecpriceimport.import_file_path = None
+
+    # Set the EMS start datetime in UTC, as it would be on a host running UTC:
+    # 2024-11-10 22:00 UTC == 2024-11-11 00:00 Europe/Berlin.
+    ems_eos.set_start_datetime(to_datetime("2024-11-10 22:00:00", in_timezone="UTC"))
+    provider.delete_by_datetime(start_datetime=None, end_datetime=None)
+
+    provider.update_data()
+    assert provider.ems_start_datetime is not None
+
+    # Index 0 (value 0.0003384) must land on 00:00 in the configured timezone,
+    # i.e. 2024-11-11 00:00 Europe/Berlin = 2024-11-10 23:00 UTC.
+    # The local-midnight anchor in Berlin must be used, not UTC midnight.
+    berlin_midnight = to_datetime("2024-11-11T00:00:00", in_timezone="Europe/Berlin")
+    rec = provider.get_by_datetime(berlin_midnight)
+    assert rec is not None
+    npt.assert_allclose(rec.elecprice_marketprice_wh, sample_import_1_json[key][0], rtol=0.001)
+
+    # Sanity: the wrong (UTC-midnight) anchor must NOT match the first value.
+    utc_midnight = to_datetime("2024-11-11T00:00:00", in_timezone="UTC")
+    rec_utc = provider.get_by_datetime(utc_midnight)
+    if rec_utc is not None and rec_utc.elecprice_marketprice_wh is not None:
+        with pytest.raises(AssertionError):
+            npt.assert_allclose(
+                rec_utc.elecprice_marketprice_wh,
+                sample_import_1_json[key][0],
+                rtol=0.001,
+                err_msg="UTC anchor must not align with index 0",
+            )

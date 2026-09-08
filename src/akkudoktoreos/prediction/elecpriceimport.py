@@ -14,6 +14,7 @@ from pydantic import Field, field_validator
 from akkudoktoreos.config.configabc import SettingsBaseModel
 from akkudoktoreos.prediction.elecpriceabc import ElecPriceProvider
 from akkudoktoreos.prediction.predictionabc import PredictionImportProvider
+from akkudoktoreos.utils.datetimeutil import to_datetime
 
 
 class ElecPriceImportCommonSettings(SettingsBaseModel):
@@ -65,7 +66,11 @@ class ElecPriceImport(ElecPriceProvider, PredictionImportProvider):
 
     def _update_data(self, force_update: Optional[bool] = False) -> None:
         # Anchor to start of day so index 0 maps to 00:00 for daily HT/NT schedules.
-        start_datetime = self.ems_start_datetime.start_of("day")
+        # Interpret the start of day in the configured location timezone, not the host's,
+        # so that a static 24h schedule aligns with the location's wall-clock time.
+        start_datetime = to_datetime(
+            self.ems_start_datetime, in_timezone=self.config.general.timezone
+        ).start_of("day")
         if self.config.elecprice.elecpriceimport.import_file_path:
             self.import_from_file(
                 self.config.elecprice.elecpriceimport.import_file_path,

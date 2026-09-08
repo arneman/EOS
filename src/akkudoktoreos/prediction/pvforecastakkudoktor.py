@@ -328,7 +328,12 @@ class PVForecastAkkudoktor(PVForecastProvider):
             dt = to_datetime(original_datetime, in_timezone=self.config.general.timezone)
 
             # Skip outdated forecast data
-            if compare_datetimes(dt, self.ems_start_datetime.start_of("day")).lt:
+            if compare_datetimes(
+                dt,
+                to_datetime(
+                    self.ems_start_datetime, in_timezone=self.config.general.timezone
+                ).start_of("day"),
+            ).lt:
                 continue
 
             sum_dc_power = sum(values.dcPower for values in forecast_values)
