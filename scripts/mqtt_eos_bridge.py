@@ -14,6 +14,16 @@ MQTT Topics:
     → summed grid_export_emr (optional, cumulative export meter)
 - devices/bmw_i5//battery_missing_until_max_soc_wh → virtual battery capacity update
 
+EOS → MQTT (published):
+- eos/pv_forecast/hourly          → hourly PV AC power forecast (Wh per hour) for the rest of the day
+- eos/pv_forecast/today_remaining_wh → remaining PV production for today (Wh)
+- eos/pv_forecast/today_wh           → full-day PV production for today (Wh, no time filter)
+
+  These are fetched from the EOS prediction API:
+    GET /v1/prediction/list?key=pvforecast_ac_power&start_datetime=<...>&end_datetime=<...>
+  Values are in W per interval (1h → Wh). Timestamps are ISO format in the EOS timezone.
+  Note: the API returns aggregated PV output only -- per-plant data is not exposed.
+
 Virtual Battery Strategy:
   EOS battery capacity is inflated by the EV's energy deficit so that EOS
   plans enough PV charging for both battery and EV. The reported SOC is
@@ -38,8 +48,9 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional
+from zoneinfo import ZoneInfo
 
 try:
     import paho.mqtt.client as mqtt
@@ -64,12 +75,15 @@ DEFAULT_LOG_LEVEL = "INFO"
 EOS_MEASUREMENT_PATH = "/v1/measurement/value"
 EOS_CONFIG_PATH = "/v1/config/devices/batteries/0"
 EOS_HEALTH_PATH = "/v1/health"
+EOS_PREDICTION_LIST_PATH = "/v1/prediction/list"
+EOS_CONFIG_TIMEZONE_PATH = "/v1/config/general/timezone"
 
 EOS_PUT_TIMEOUT_S = 5
 EOS_HEALTH_TIMEOUT_S = 5
 EOS_SEND_INTERVAL_S = 60
 EOS_POLL_INTERVAL_S = 30  # How often to poll EOS solution (baseline)
 EOS_HEALTH_CHECK_INTERVAL_S = 5  # How often to check for a new optimization result
+EOS_PV_FORECAST_INTERVAL_S = 300  # How often to refresh PV prediction (5 min)
 MQTT_KEEPALIVE_S = 60
 
 # MQTT Publish topics (EOS → MQTT)
@@ -82,6 +96,12 @@ MQTT_PUB_BATTERY_POWER = f"{MQTT_PUB_PREFIX}/battery/charge_power_w"
 MQTT_PUB_EV_CHARGE = f"{MQTT_PUB_PREFIX}/ev/charge_allowed"
 MQTT_PUB_EV_POWER = f"{MQTT_PUB_PREFIX}/ev/charge_power_w"
 MQTT_PUB_SCHEDULE = f"{MQTT_PUB_PREFIX}/schedule"
+MQTT_PUB_PV_FORECAST_HOURLY = f"{MQTT_PUB_PREFIX}/pv_forecast/hourly"
+MQTT_PUB_PV_TOTAL_DAILY_REMAINING_WH = (
+    f"{MQTT_PUB_PREFIX}/pv_forecast/today_remaining_wh"
+)
+MQTT_PUB_PV_TODAY_WH = f"{MQTT_PUB_PREFIX}/pv_forecast/today_wh"
+MQTT_PUB_PV_TOMORROW_WH = f"{MQTT_PUB_PREFIX}/pv_forecast/tomorrow_wh"
 
 # MQTT Topics
 TOPIC_BMW_SOC = "devices/bmw_i5/cardata/drivetrain/batteryManagement/header"
@@ -93,6 +113,9 @@ TOPIC_EV_DEFICIT = "devices/bmw_i5/battery_missing_until_max_soc_wh"
 TOPIC_EV_PLUGGED = "devices/bmw_i5/is_plugged"
 TOPIC_EV_MAX_POWER = "devices/bmw_i5/max_power"
 TOPIC_BATTERY_ACTIVE_SOC_LIMIT = "devices/victron_battery/active_soc_limit"
+
+# Tomorrow forecast timestamp (midnight of tomorrow in EOS timezone)
+TOMORROW_DAY_START_FMT = "%Y-%m-%d %H:00:00"
 
 # EOS measurement keys
 BMW_SOC_EOS_KEY = "BMW_i5-soc-factor"
@@ -193,7 +216,9 @@ ev_plugged: bool = False  # Whether EV is currently plugged in
 ev_max_charge_w: float = EV_MAX_CHARGE_W_DEFAULT  # EV max charge power from MQTT [W]
 battery_soc_factor: Optional[float] = None  # Last known real battery SOC (0.0-1.0)
 eos_current_capacity_wh: float = REAL_BATTERY_CAPACITY_WH  # Currently configured in EOS
-eos_current_max_charge_w: float = REAL_BATTERY_MAX_CHARGE_W  # Currently configured in EOS
+eos_current_max_charge_w: float = (
+    REAL_BATTERY_MAX_CHARGE_W  # Currently configured in EOS
+)
 real_battery_min_soc_percentage: float = REAL_BATTERY_MIN_SOC_PERCENT_DEFAULT
 eos_current_min_soc_percentage: int = int(round(REAL_BATTERY_MIN_SOC_PERCENT_DEFAULT))
 grid_export_meter_values: Dict[str, Optional[float]] = {
@@ -206,7 +231,9 @@ repeat_thread_running = False
 repeat_thread: Optional[threading.Thread] = None
 solution_thread: Optional[threading.Thread] = None
 mqtt_client: Optional[mqtt.Client] = None  # Set in main() for publishing
-eos_recovery_mode: bool = False  # True after EOS write failures until health/replay succeeds
+eos_recovery_mode: bool = (
+    False  # True after EOS write failures until health/replay succeeds
+)
 
 
 # =============================================================================
@@ -224,12 +251,12 @@ def send_measurement_to_eos(
     min_delta: float = 0.0,
 ) -> bool:
     """Send measurement value to EOS via REST API with unified deduplication.
-    
+
     Sends if:
     - Value changed from last sent value by at least min_delta, OR
     - EOS_REFRESH_INTERVAL_S seconds have passed since last send (if > 0), OR
     - force=True (bypass all checks)
-    
+
     Args:
         key: EOS measurement key
         value: Measurement value (float)
@@ -237,7 +264,7 @@ def send_measurement_to_eos(
         force: Force send even if value unchanged or time threshold not met
         source: Optional source prefix for logging (e.g., "mqtt", "repeat")
         value_formatted: Optional pre-formatted value string for logging (e.g., "85.0%", "2500W")
-    
+
         min_delta: Minimum absolute change required before sending an updated value.
 
     Returns:
@@ -246,17 +273,17 @@ def send_measurement_to_eos(
     global eos_recovery_mode
 
     now_ts = time.time()
-    now = datetime.now().astimezone().isoformat(timespec='seconds')
-    
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+
     # Check if value changed or 60 seconds passed
     last_value = eos_last_values.get(key)
     last_send_ts = eos_last_timestamps.get(key, 0)
     time_since_last_send = now_ts - last_send_ts
-    
+
     # Determine if we should send
     should_send = force
     skip_reason = None
-    
+
     if not should_send:
         if last_value is None:
             # First time sending this key
@@ -272,17 +299,21 @@ def send_measurement_to_eos(
                 logger.debug(f"Value changed: {key}: {last_value} → {value}")
                 should_send = True
 
-        if not should_send and EOS_REFRESH_INTERVAL_S > 0 and time_since_last_send >= EOS_REFRESH_INTERVAL_S:
+        if (
+            not should_send
+            and EOS_REFRESH_INTERVAL_S > 0
+            and time_since_last_send >= EOS_REFRESH_INTERVAL_S
+        ):
             # Optional safety refresh interval
             should_send = True
 
         if not should_send:
             skip_reason = f"unchanged, {time_since_last_send:.0f}s since last send"
-    
+
     if not should_send:
         logger.trace(f"Skipping {key}={value} ({skip_reason})")
         return True  # Not an error, just skipped
-    
+
     try:
         response = requests.put(
             EOS_MEASUREMENT_ENDPOINT,
@@ -290,18 +321,18 @@ def send_measurement_to_eos(
             timeout=EOS_PUT_TIMEOUT_S,
         )
         response.raise_for_status()
-        
+
         # Update tracking on success
         eos_last_values[key] = value
         eos_last_timestamps[key] = now_ts
         eos_recovery_mode = False
-        
+
         # Unified logging with optional source prefix
         log_prefix = f"({source})" if source else ""
         log_value = value_formatted if value_formatted else f"{value:.1f}"
         logger.info(f"{log_prefix} ✓ {description}: {log_value}")
         logger.debug(f"EOS: {key}={value:.3f} → {response.status_code}")
-        
+
         return True
     except requests.exceptions.RequestException as e:
         logger.error(f"✗ Failed to send {key}={value} to EOS: {e}")
@@ -312,18 +343,198 @@ def send_measurement_to_eos(
 def check_eos_reachable() -> bool:
     """Check whether EOS API is reachable and healthy."""
     try:
-        response = requests.get(f"{EOS_URL}{EOS_HEALTH_PATH}", timeout=EOS_HEALTH_TIMEOUT_S)
+        response = requests.get(
+            f"{EOS_URL}{EOS_HEALTH_PATH}", timeout=EOS_HEALTH_TIMEOUT_S
+        )
         response.raise_for_status()
         return True
     except requests.exceptions.RequestException:
         return False
 
 
+def fetch_eos_timezone() -> Optional[str]:
+    """Fetch the EOS-configured timezone (e.g. 'Europe/Berlin') from the API.
+
+    Returns:
+        IANA timezone name, or None if unavailable.
+    """
+    try:
+        response = requests.get(
+            f"{EOS_URL}{EOS_CONFIG_TIMEZONE_PATH}", timeout=EOS_PUT_TIMEOUT_S
+        )
+        response.raise_for_status()
+        tz = response.json()
+        if isinstance(tz, str) and tz:
+            return tz
+        logger.warning(f"Unexpected timezone value from EOS: {tz!r}")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"✗ Failed to fetch EOS timezone: {e}")
+        return None
+
+
+def _fetch_pv_hours(
+    start_dt: datetime, end_dt: datetime
+) -> tuple[list[float], list[str]]:
+    """Fetch hourly PV AC power forecast values (W per hour) for a [start, end) window.
+
+    Returns (values, hours); values are in W per hourly interval, timestamps are
+    short ISO format in the EOS timezone.
+    """
+    response = requests.get(
+        f"{EOS_URL}{EOS_PREDICTION_LIST_PATH}",
+        params={
+            "key": "pvforecast_ac_power",
+            "start_datetime": start_dt.strftime("%Y-%m-%d %H:00:00"),
+            "end_datetime": end_dt.strftime("%Y-%m-%d %H:00:00"),
+        },
+        timeout=EOS_PUT_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, list):
+        raise ValueError(f"Unexpected PV forecast format from EOS: {data!r}")
+    values = [float(v) for v in data]
+    hours = [
+        (start_dt + timedelta(hours=i)).isoformat(timespec="minutes")
+        for i in range(len(values))
+    ]
+    return values, hours
+
+
+def fetch_pv_forecast() -> (
+    tuple[list[float], list[str], float, float, list[float], list[str]]
+):
+    """Fetch today's and tomorrow's PV AC power forecasts from the EOS API.
+
+    Requests the aggregated PV AC power forecast (W per hour) for both today and tomorrow.
+    The timestamps are in the EOS-configured timezone.
+
+    Returns:
+        (values_today, hours_today, total_remaining_wh, total_daily_wh, values_tomorrow, hours_tomorrow)
+            - values_today: PV AC power in W for each remaining hourly interval of today.
+            - hours_today: ISO timestamps for each interval of today's forecast.
+            - total_remaining_wh: area-under-curve of the remaining forecast for today (Wh).
+            - total_daily_wh: area-under-curve of the full day 00:00→24:00 for today (Wh).
+            - values_tomorrow: PV AC power in W for each hourly interval of tomorrow.
+            - hours_tomorrow: ISO timestamps for each interval of tomorrow's forecast.
+    """
+    # Determine "now" in the EOS timezone so the remaining-hours window matches
+    # the EOS prediction calendar (which is in the EOS timezone).
+    tz_name = fetch_eos_timezone()
+    if tz_name:
+        try:
+            now = datetime.now(ZoneInfo(tz_name))
+        except Exception as e:
+            logger.warning(f"Invalid EOS timezone '{tz_name}': {e}")
+            now = datetime.now().astimezone()
+    else:
+        now = datetime.now().astimezone()
+
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = now.replace(minute=0, second=0, microsecond=0)
+    try:
+        # Three windows: today's remaining hours, today's full day, tomorrow.
+        # `end` is midnight of the next day, so it is also tomorrow's start.
+        windows = [
+            (start, end),
+            (day_start, end),
+            (end, end + timedelta(days=1)),
+        ]
+        (
+            (values_today, hours_today),
+            (day_values, _),
+            (values_tomorrow, hours_tomorrow),
+        ) = (_fetch_pv_hours(s, e) for s, e in windows)
+
+        total_remaining_wh = sum(values_today)
+        total_daily_wh = sum(day_values)
+        return (
+            values_today,
+            hours_today,
+            total_remaining_wh,
+            total_daily_wh,
+            values_tomorrow,
+            hours_tomorrow,
+        )
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"✗ Failed to fetch PV forecast from EOS: {e}")
+        return [], [], 0.0, 0.0, [], []
+    except (ValueError, TypeError) as e:
+        logger.warning(f"✗ Unexpected PV forecast data from EOS: {e}")
+        return [], [], 0.0, 0.0, [], []
+
+
+def publish_pv_forecast() -> None:
+    """Fetch PV forecast from EOS and publish it to MQTT.
+
+    Publishes today's and tomorrow's hourly forecasts, plus daily totals via these topics:
+      - eos/pv_forecast/hourly             (JSON list of {time, power_wh} for both days)
+      - eos/pv_forecast/today_wh           (full-day PV production for today Wh)
+      - eos/pv_forecast/today_remaining_wh (remaining PV production for today Wh)
+      - eos/pv_forecast/tomorrow_wh         (full-day PV production for tomorrow Wh)
+
+    Skips publishing if the forecast is empty or MQTT is not connected.
+    """
+    if mqtt_client is None or not mqtt_client.is_connected():
+        return
+
+    (
+        values_today,
+        hours_today,
+        total_remaining_wh,
+        total_daily_wh,
+        values_tomorrow,
+        hours_tomorrow,
+    ) = fetch_pv_forecast()
+
+    if not values_today:
+        logger.debug("No PV forecast available today, skipping MQTT publish.")
+        return
+
+    # Combine today's and tomorrow's hourly forecasts
+    all_values = values_today + values_tomorrow
+    all_hours = hours_today + hours_tomorrow
+
+    # Build combined hourly payload with timestamps for both days
+    hourly_payload = [
+        {"time": all_hours[i], "power_wh": round(all_values[i], 0)}
+        for i in range(len(all_hours))
+    ]
+
+    total_daily_tomorrow_wh = sum(values_tomorrow) if values_tomorrow else 0.0
+
+    try:
+        mqtt_client.publish(
+            MQTT_PUB_PV_FORECAST_HOURLY, json.dumps(hourly_payload), retain=True
+        )
+        mqtt_client.publish(MQTT_PUB_PV_TODAY_WH, f"{total_daily_wh:.0f}", retain=True)
+        mqtt_client.publish(
+            MQTT_PUB_PV_TOTAL_DAILY_REMAINING_WH,
+            f"{total_remaining_wh:.0f}",
+            retain=True,
+        )
+        # Add new topic for tomorrow's daily total
+        mqtt_client.publish(
+            MQTT_PUB_PV_TOMORROW_WH, f"{total_daily_tomorrow_wh:.0f}", retain=True
+        )
+        logger.info(
+            f"(eos→mqtt) PV forecast: today {len(hours_today)}h + tomorrow {len(hours_tomorrow)}h, "
+            f"today remaining {total_remaining_wh:.0f} Wh, full day {total_daily_wh:.0f} Wh, "
+            f"tomorrow {total_daily_tomorrow_wh:.0f} Wh"
+        )
+    except Exception as e:
+        logger.error(f"✗ Failed to publish PV forecast to MQTT: {e}")
+
+
 def replay_cached_measurements(source: str = "recovery") -> None:
     """Replay latest cached values once (used after EOS recovery)."""
     if not eos_last_values:
         return
-    logger.info(f"Replaying {len(eos_last_values)} cached EOS measurement(s) ({source})...")
+    logger.info(
+        f"Replaying {len(eos_last_values)} cached EOS measurement(s) ({source})..."
+    )
     for key, value in list(eos_last_values.items()):
         if value is None:
             continue
@@ -364,7 +575,7 @@ def repeat_all_values():
                 if now_ts - last_periodic_resend_ts >= EOS_SEND_INTERVAL_S:
                     replay_cached_measurements(source="periodic")
                     last_periodic_resend_ts = now_ts
-            
+
         except Exception as e:
             logger.error(f"Error in repeat thread: {e}")
 
@@ -420,7 +631,9 @@ def update_eos_battery_config() -> bool:
     new_max_charge = int(get_virtual_max_charge_w())
     new_min_soc_percentage = get_virtual_min_soc_percentage()
 
-    capacity_changed = abs(new_capacity - eos_current_capacity_wh) > 100  # >100 Wh threshold
+    capacity_changed = (
+        abs(new_capacity - eos_current_capacity_wh) > 100
+    )  # >100 Wh threshold
     charge_changed = abs(new_max_charge - eos_current_max_charge_w) > 100
     min_soc_changed = new_min_soc_percentage != eos_current_min_soc_percentage
 
@@ -439,7 +652,9 @@ def update_eos_battery_config() -> bool:
             )
             resp.raise_for_status()
             eos_current_capacity_wh = new_capacity
-            logger.info(f"✓ EOS capacity updated: {new_capacity} Wh (EV deficit: {int(ev_deficit_wh)} Wh)")
+            logger.info(
+                f"✓ EOS capacity updated: {new_capacity} Wh (EV deficit: {int(ev_deficit_wh)} Wh)"
+            )
         except requests.exceptions.RequestException as e:
             logger.error(f"✗ Failed to update EOS capacity: {e}")
             success = False
@@ -519,16 +734,35 @@ def send_grid_export_sum() -> None:
 # GRID_SUPPORT_IMPORT: AC charge from grid.
 # FORCED_CHARGE: AC + DC charge, no discharge.
 # SELF_CONSUMPTION: DC charge from surplus + discharge allowed.
-CHARGING_MODES = {"NON_EXPORT", "GRID_SUPPORT_IMPORT", "FORCED_CHARGE", "SELF_CONSUMPTION"}
+CHARGING_MODES = {
+    "NON_EXPORT",
+    "GRID_SUPPORT_IMPORT",
+    "FORCED_CHARGE",
+    "SELF_CONSUMPTION",
+}
 # Battery operation modes that indicate discharging is allowed (to cover load or export).
 # SELF_CONSUMPTION allows both charging and discharging, so it appears in both sets.
-DISCHARGING_MODES = {"PEAK_SHAVING", "GRID_SUPPORT_EXPORT", "FORCED_DISCHARGE", "SELF_CONSUMPTION"}
+DISCHARGING_MODES = {
+    "PEAK_SHAVING",
+    "GRID_SUPPORT_EXPORT",
+    "FORCED_DISCHARGE",
+    "SELF_CONSUMPTION",
+}
 
 # All known operation modes (prefix stripped from column names)
 OPERATION_MODES = [
-    "idle", "non_export", "grid_support_import", "grid_support_export",
-    "peak_shaving", "self_consumption", "forced_charge", "forced_discharge",
-    "fault", "frequency_regulation", "outage_supply", "ramp_rate_control",
+    "idle",
+    "non_export",
+    "grid_support_import",
+    "grid_support_export",
+    "peak_shaving",
+    "self_consumption",
+    "forced_charge",
+    "forced_discharge",
+    "fault",
+    "frequency_regulation",
+    "outage_supply",
+    "ramp_rate_control",
     "reserve_backup",
 ]
 
@@ -564,6 +798,7 @@ def poll_eos_solution():
     last_factor = None
     last_run_datetime: Optional[str] = None
     last_publish_ts: float = 0.0
+    last_pv_forecast_ts: float = 0.0
 
     while repeat_thread_running:
         try:
@@ -576,6 +811,14 @@ def poll_eos_solution():
             now_ts = time.time()
             time_since_publish = now_ts - last_publish_ts
 
+            # Publish PV forecast periodically (independent of optimization runs)
+            if now_ts - last_pv_forecast_ts >= EOS_PV_FORECAST_INTERVAL_S:
+                try:
+                    publish_pv_forecast()
+                    last_pv_forecast_ts = now_ts
+                except Exception as e:
+                    logger.error(f"Error publishing PV forecast: {e}")
+
             # Check if a new optimization has completed via health endpoint
             new_optimization = False
             try:
@@ -585,9 +828,16 @@ def poll_eos_solution():
                 )
                 health_resp.raise_for_status()
                 health_data = health_resp.json()
-                current_last_run = health_data.get("energy-management", {}).get("last_run_datetime")
-                if last_run_datetime is not None and current_last_run != last_run_datetime:
-                    logger.info(f"(eos→mqtt) New optimization result detected: {current_last_run}")
+                current_last_run = health_data.get("energy-management", {}).get(
+                    "last_run_datetime"
+                )
+                if (
+                    last_run_datetime is not None
+                    and current_last_run != last_run_datetime
+                ):
+                    logger.info(
+                        f"(eos→mqtt) New optimization result detected: {current_last_run}"
+                    )
                     new_optimization = True
                 last_run_datetime = current_last_run
             except requests.exceptions.RequestException as e:
@@ -672,9 +922,15 @@ def poll_eos_solution():
             # Publish current state (retained)
             mqtt_client.publish(MQTT_PUB_BATTERY_MODE, mode, retain=True)
             mqtt_client.publish(MQTT_PUB_BATTERY_FACTOR, f"{factor:.2f}", retain=True)
-            mqtt_client.publish(MQTT_PUB_BATTERY_CHARGE, str(charge_allowed), retain=True)
-            mqtt_client.publish(MQTT_PUB_BATTERY_DISCHARGE, str(discharge_allowed), retain=True)
-            mqtt_client.publish(MQTT_PUB_BATTERY_POWER, str(battery_power_w), retain=True)
+            mqtt_client.publish(
+                MQTT_PUB_BATTERY_CHARGE, str(charge_allowed), retain=True
+            )
+            mqtt_client.publish(
+                MQTT_PUB_BATTERY_DISCHARGE, str(discharge_allowed), retain=True
+            )
+            mqtt_client.publish(
+                MQTT_PUB_BATTERY_POWER, str(battery_power_w), retain=True
+            )
             mqtt_client.publish(MQTT_PUB_EV_CHARGE, str(ev_charge_allowed), retain=True)
             mqtt_client.publish(MQTT_PUB_EV_POWER, str(ev_power_w), retain=True)
 
@@ -694,14 +950,16 @@ def poll_eos_solution():
                     power_w = int((soc_next - soc_now) * REAL_BATTERY_CAPACITY_WH)
                 else:
                     power_w = 0
-                schedule.append({
-                    "time": ts,
-                    "mode": m,
-                    "factor": round(f, 2),
-                    "charge": 1 if m in CHARGING_MODES else 0,
-                    "soc": round(r.get("LiFePO4_Cluster_soc_factor", 0.0), 3),
-                    "power_w": power_w,
-                })
+                schedule.append(
+                    {
+                        "time": ts,
+                        "mode": m,
+                        "factor": round(f, 2),
+                        "charge": 1 if m in CHARGING_MODES else 0,
+                        "soc": round(r.get("LiFePO4_Cluster_soc_factor", 0.0), 3),
+                        "power_w": power_w,
+                    }
+                )
             mqtt_client.publish(MQTT_PUB_SCHEDULE, json.dumps(schedule), retain=True)
 
             last_publish_ts = now_ts
@@ -742,7 +1000,9 @@ def on_connect(client, userdata, flags, rc, properties=None):
 def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
     """Callback when MQTT connection is lost."""
     if reason_code != 0:
-        logger.warning(f"Unexpected MQTT disconnect (code {reason_code}). Reconnecting...")
+        logger.warning(
+            f"Unexpected MQTT disconnect (code {reason_code}). Reconnecting..."
+        )
 
 
 def on_message(client, userdata, msg):
@@ -785,7 +1045,9 @@ def on_message(client, userdata, msg):
             new_min_soc = max(0.0, min(100.0, float(payload)))
             if abs(new_min_soc - real_battery_min_soc_percentage) >= 0.1:
                 real_battery_min_soc_percentage = new_min_soc
-                logger.info(f"(mqtt) ✓ Battery active SoC limit: {real_battery_min_soc_percentage:.1f}%")
+                logger.info(
+                    f"(mqtt) ✓ Battery active SoC limit: {real_battery_min_soc_percentage:.1f}%"
+                )
                 update_eos_battery_config()
 
         # Handle battery SOC → store real value and send virtual SOC
@@ -860,7 +1122,9 @@ def main():
 
     # Check EOS connectivity
     try:
-        response = requests.get(f"{EOS_URL}{EOS_HEALTH_PATH}", timeout=EOS_HEALTH_TIMEOUT_S)
+        response = requests.get(
+            f"{EOS_URL}{EOS_HEALTH_PATH}", timeout=EOS_HEALTH_TIMEOUT_S
+        )
         response.raise_for_status()
         logger.success(f"✓ EOS is reachable at {EOS_URL}")
     except requests.exceptions.RequestException as e:
@@ -895,7 +1159,7 @@ def main():
     # Start EOS solution polling thread
     solution_thread = threading.Thread(target=poll_eos_solution, daemon=True)
     solution_thread.start()
-    
+
     # Start MQTT loop
     logger.info("Starting MQTT loop... (Press Ctrl+C to exit)")
     try:
