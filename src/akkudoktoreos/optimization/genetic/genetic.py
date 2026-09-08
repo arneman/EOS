@@ -1001,41 +1001,40 @@ class GeneticOptimization(OptimizationBase):
                     max_soc_pct = float(parameters.pv_akku.max_soc_percentage)
                     max_charge_power_wh = float(self.simulation.battery.max_charge_power_w)
 
-                    # Anchor the target on the SOC at the first hour with real
-                    # capturable surplus (PV > load), not merely the first hour
-                    # with any PV at all: dawn/dusk PV can be a trickle far
-                    # below load for a while, and anchoring there would still
-                    # raise the shortfall 1:1 for discharge during that
-                    # pre-surplus window, penalizing it as if it were
-                    # uncaptured PV surplus.
                     for period_start, target_hour in pv_periods:
                         soc_index = target_hour - start_hour
-                        anchor_hour = None
-                        for hour in range(period_start, target_hour + 1):
-                            if pv_arr[hour] > load_arr[hour]:
-                                anchor_hour = hour
-                                break
-                        if anchor_hour is None:
-                            # No hour in this PV period ever produced real surplus (e.g. a
-                            # heavily overcast day) - fall back to the peak-PV hour so at
-                            # least the afternoon half stays free of the target's shortfall
-                            # penalty, instead of protecting the whole day from period_start.
-                            anchor_hour = max(
-                                range(period_start, target_hour + 1), key=lambda h: pv_arr[h]
-                            )
-                        start_index = anchor_hour - start_hour
-                        if not (0 <= soc_index < len(soc_arr)) or not (
-                            0 <= start_index < len(soc_arr)
-                        ):
+                        if not (0 <= soc_index < len(soc_arr)):
                             continue
-
-                        battery_soc_at_start = float(soc_arr[start_index])
                         battery_soc_at_target = float(soc_arr[soc_index])
 
                         if objective_mode in {
                             "pv_surplus_capture_objective",
                             "pv_surplus_option_value",
                         }:
+                            # Anchor the target on the SOC at the first hour with real
+                            # capturable surplus (PV > load), not merely the first hour
+                            # with any PV at all: dawn/dusk PV can be a trickle far
+                            # below load for a while, and anchoring there would still
+                            # raise the shortfall 1:1 for discharge during that
+                            # pre-surplus window, penalizing it as if it were
+                            # uncaptured PV surplus.
+                            anchor_hour = None
+                            for hour in range(period_start, target_hour + 1):
+                                if pv_arr[hour] > load_arr[hour]:
+                                    anchor_hour = hour
+                                    break
+                            if anchor_hour is None:
+                                # No hour in this PV period ever produced real surplus (e.g.
+                                # a heavily overcast day, or PV output far below load all
+                                # day). There is nothing captured to protect, so skip the
+                                # target for this period instead of freezing the battery at
+                                # whatever SOC it happens to have at some arbitrary hour.
+                                continue
+                            start_index = anchor_hour - start_hour
+                            if not (0 <= start_index < len(soc_arr)):
+                                continue
+                            battery_soc_at_start = float(soc_arr[start_index])
+
                             capturable_pv_wh = 0.0
                             for hour in range(period_start, target_hour + 1):
                                 pv_surplus_wh = max(
