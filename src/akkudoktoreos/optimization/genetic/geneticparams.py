@@ -520,7 +520,7 @@ class GeneticOptimizationParameters(
                 cls.config.devices.max_batteries = 1
             if cls.config.devices.max_batteries == 0:
                 battery_params = None
-                battery_lcos_kwh = 0
+                battery_residual_value_kwh = 0
             else:
                 if cls.config.devices.batteries is None:
                     logger.info("No battery device data available - defaulting to demo data.")
@@ -545,14 +545,14 @@ class GeneticOptimizationParameters(
                     cls.config.devices.batteries = [{"device_id": "battery1", "capacity_wh": 8000}]
                     # Retry
                     continue
-                # Levelized cost of ownership
-                if battery_config.levelized_cost_of_storage_kwh is None:
+                # Value of energy left in the battery at the end of the horizon
+                if battery_config.residual_energy_value_kwh is None:
                     logger.info(
-                        "No battery device LCOS data available - defaulting to 0 €/kWh. Parameter preparation attempt {}.",
+                        "No battery device residual energy value available - defaulting to 0 €/kWh. Parameter preparation attempt {}.",
                         attempt,
                     )
-                    battery_config.levelized_cost_of_storage_kwh = 0
-                battery_lcos_kwh = battery_config.levelized_cost_of_storage_kwh
+                    battery_config.residual_energy_value_kwh = 0
+                battery_residual_value_kwh = battery_config.residual_energy_value_kwh
                 # Initial SOC
                 try:
                     initial_soc_factor = cls.measurement.key_to_value(
@@ -787,7 +787,7 @@ class GeneticOptimizationParameters(
                         strompreis_euro_pro_wh=elecprice_marketprice_wh,
                         einspeiseverguetung_euro_pro_wh=feed_in_tariff_wh,
                         gesamtlast=loadforecast_power_w,
-                        preis_euro_pro_wh_akku=battery_lcos_kwh / 1000,
+                        preis_euro_pro_wh_akku=battery_residual_value_kwh / 1000,
                     ),
                     temperature_forecast=weather_temp_air,
                     pv_akku=battery_params,

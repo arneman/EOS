@@ -7,7 +7,7 @@ from typing import Any, Optional, TextIO, cast
 import numpy as np
 from loguru import logger
 from numpydantic import NDArray, Shape
-from pydantic import Field, computed_field, field_validator, model_validator
+from pydantic import AliasChoices, Field, computed_field, field_validator, model_validator
 
 from akkudoktoreos.config.configabc import SettingsBaseModel, TimeWindowSequence
 from akkudoktoreos.core.cache import CacheFileStore
@@ -48,11 +48,19 @@ class BatteriesCommonSettings(DevicesBaseSettings):
         },
     )
 
-    levelized_cost_of_storage_kwh: float = Field(
+    residual_energy_value_kwh: float = Field(
         default=0.0,
+        validation_alias=AliasChoices(
+            "residual_energy_value_kwh", "levelized_cost_of_storage_kwh"
+        ),
         json_schema_extra={
-            "description": "Levelized cost of storage (LCOS), the average lifetime cost of delivering one kWh [€/kWh].",
-            "examples": [0.12],
+            "description": (
+                "Value assigned to energy still stored in the battery at the end of the "
+                "optimization horizon [€/kWh]. Acts as the minimum price at which the "
+                "battery is willing to discharge, so keep it below the cheapest import "
+                "tariff. Deprecated alias: levelized_cost_of_storage_kwh."
+            ),
+            "examples": [0.15],
         },
     )
 
